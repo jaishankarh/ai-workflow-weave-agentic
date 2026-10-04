@@ -13,7 +13,7 @@ One code repository belonging to a Product. Hosted on exactly one **Code host**;
 The issue platform a Product uses (GitHub Issues, GitLab, Jira). Reached only through a **Tracker adapter**.
 
 ## Tracker adapter
-The mapping between canonical **States** and a Tracker's native labels, statuses and hierarchy. Covers everything about Stories and Tasks; knows nothing about PRs.
+The mapping between canonical **States** and a Tracker's labels and hierarchy. A State is always a label; a Tracker's own status, where it has one, only mirrors the State for humans and is never read to decide it. Covers everything about Stories and Tasks; knows nothing about PRs.
 
 ## Code host
 The platform a Repo's code and PRs live on (GitLab, Bitbucket, GitHub). Independent of the Tracker: a Jira Product may keep its Repos on Bitbucket and GitLab.
