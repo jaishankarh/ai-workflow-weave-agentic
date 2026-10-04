@@ -22,6 +22,9 @@ A build-ready spec of the developer workflow graph (every State, transition, Gat
 
 <!-- one line per closed ticket -->
 
+- [Research orchestration engines for a gated, long-running ticket workflow](tickets/01-research-orchestration-engines.md): Temporal has the strongest durable waits; n8n's Wait node is workable but resume URLs are per-run; LangGraph self-hosted server needs Enterprise and the library has no webhooks/cron; Langflow isn't viable yet; a tracker-as-truth dispatcher has lowest drift but hand-written retries. Every option needs a polling reconciler (GitHub doesn't redeliver failed webhooks).
+- [Research remote agent runtimes (OpenHands vs headless alternatives)](tickets/02-research-agent-runtimes.md): OpenHands is model-agnostic with GitHub/GitLab/Jira triggers but its Cloud API takes one repo and has no completion webhook; Claude Agent SDK / Managed Agents give full programmatic control and ship a browser; Codex Cloud needs a ChatGPT seat. All read SKILL.md from different folders and none loads CONTEXT.md/coding-standards.md unprompted.
+
 ## Not yet specified
 
 - **Staging deploys:** what counts as a deployable unit per Product (backends, frontends, APKs, other), batching cadence ("every few hours"), rollback on failed deploy, and the hand-off to docs updates.

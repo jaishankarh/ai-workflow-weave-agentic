@@ -4,7 +4,7 @@ label: wayfinder:research
 type: AFK
 blocked_by: []
 assignee:
-status: open
+status: closed
 ---
 
 ## Question
@@ -12,3 +12,7 @@ status: open
 What does each candidate runtime offer for running the AFK nodes (implement, code review, fix-review-comments, proofs, deploy) remotely and headlessly?
 
 Compare OpenHands (cloud and self-hosted, SDK/API, sandboxing), Claude Code headless / Claude Agent SDK, and Codex. For each: how a run is started and observed programmatically, how custom skills and repo files (CONTEXT.md, coding-standards.md) are loaded, multi-repo checkout, running a full test suite and browsers for screenshots inside the sandbox, secrets handling, cost/concurrency limits, and how results come back (PR, comments, artifacts).
+
+## Resolution
+
+Findings: [wayfinder/research/02-agent-runtimes.md](../research/02-agent-runtimes.md). Facts only; the choice is made in the dependent grilling ticket.
