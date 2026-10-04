@@ -7,13 +7,19 @@ One logical platform (the "super project"). Bound to exactly one **Tracker**; sp
 _Avoid:_ "Project" (GitHub, GitLab and Jira each use it for something else).
 
 ## Repo
-One code repository belonging to a Product.
+One code repository belonging to a Product. Hosted on exactly one **Code host**; the Repos of one Product may sit on different Code hosts.
 
 ## Tracker
 The issue platform a Product uses (GitHub Issues, GitLab, Jira). Reached only through a **Tracker adapter**.
 
 ## Tracker adapter
-The mapping between canonical **States** and a Tracker's native labels, statuses and hierarchy.
+The mapping between canonical **States** and a Tracker's native labels, statuses and hierarchy. Covers everything about Stories and Tasks; knows nothing about PRs.
+
+## Code host
+The platform a Repo's code and PRs live on (GitLab, Bitbucket, GitHub). Independent of the Tracker: a Jira Product may keep its Repos on Bitbucket and GitLab.
+
+## Code host adapter
+The mapping between a Code host's PRs and the workflow: PR status, merge, and the PR's link back to its Task. Paired freely with any Tracker adapter.
 
 ## Story
 One idea, feature request or bug. May span Repos, and names every Repo it touches. Lives in the Product's Tracker, never in a code Repo. Jira: L0 story, its Repos as components. GitLab: an issue in the Product's story repo, its Repos as labels.
