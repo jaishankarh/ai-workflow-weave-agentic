@@ -38,6 +38,10 @@ _Avoid:_ "logs" alone, "test results" as proof.
 A file committed in a Repo that says how to bring that Repo's software up for capturing Proofs: what to build, which services it needs, what data to seed, which secrets it uses, and how to tell it is ready. Changes with the code, in the same PR. A Repo without a Run recipe cannot be proven: its spec items are "not provable here".
 _Avoid:_ "setup", "dev env" (both also mean a developer's machine).
 
+## Proof environment
+The isolated, throwaway place where one Story's software runs for one proof round: every Repo the Story touches at its Task's branch, brought up from their Run recipes. Started once all of the Story's Tasks have passed agent review, and discarded after the round. Separate from the agent that captures Proofs in it.
+_Avoid:_ "staging" (that is the shared deploy target after merge), "sandbox" alone (the agent's own workspace).
+
 ## State
 A named, unambiguous stage of a Story or Task in the workflow graph (e.g. ready-for-agent, ready-for-human-review). Replaces the overloaded word "done".
 
