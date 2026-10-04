@@ -39,6 +39,10 @@ A State where the workflow waits for a human (grilling, triage, human review, me
 ## Dispatcher
 The service that moves Stories and Tasks from one State to the next. It reads State from the Tracker and writes State back to it, but never holds State itself; what it keeps of its own is **Run bookkeeping**.
 
+## Agent profile
+A named pairing of an agent (e.g. Cursor, Claude Code, or a model-agnostic loop) and a model, used for an agent run. A Product sets a default Agent profile per workflow node; a Task may override it.
+_Avoid:_ "agent" alone when the model matters too.
+
 ## Run bookkeeping
 What the Dispatcher remembers about work in flight: agent run IDs, attempt counts, deploy batches. Never consulted to decide a State.
 _Avoid:_ "workflow state" for this.
