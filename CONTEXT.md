@@ -24,6 +24,15 @@ A sub-task of a Story. Touches **exactly one Repo** and produces **exactly one P
 ## State
 A named, unambiguous stage of a Story or Task in the workflow graph (e.g. ready-for-agent, ready-for-human-review). Replaces the overloaded word "done".
 
+A Story's State is set directly until its Tasks exist, is derived from its Tasks while they are built, and is set directly again after every Task is merged.
+
+## Follow-up Story
+A new Story linked to an earlier one, created when work is discovered after the earlier Story was tasked.
+_Avoid:_ reopening the earlier Story or moving it back to grilling.
+
+## Deploy blocker
+A link saying a Story cannot go to staging until other work is merged. The other work is either a Task added to the same Story or a Follow-up Story. Work that is nice to have, rather than required, never becomes a Deploy blocker.
+
 ## Gate
 A State where the workflow waits for a human (grilling, triage, human review, merge).
 
