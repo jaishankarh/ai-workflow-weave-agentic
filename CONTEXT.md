@@ -34,6 +34,10 @@ The single change request a Task produces in its Repo. GitLab calls it a merge r
 Evidence, captured by an agent from the running software, that one thing a Task's spec asked for works: screenshots or a recording for UI, the request, response and server log lines for an API, the command and its output for a CLI or job. A test-run report travels with Proofs but is never a Proof on its own. A Proof that shows the thing failing is a defect, not a Proof.
 _Avoid:_ "logs" alone, "test results" as proof.
 
+## Run recipe
+A file committed in a Repo that says how to bring that Repo's software up for capturing Proofs: what to build, which services it needs, what data to seed, which secrets it uses, and how to tell it is ready. Changes with the code, in the same PR. A Repo without a Run recipe cannot be proven: its spec items are "not provable here".
+_Avoid:_ "setup", "dev env" (both also mean a developer's machine).
+
 ## State
 A named, unambiguous stage of a Story or Task in the workflow graph (e.g. ready-for-agent, ready-for-human-review). Replaces the overloaded word "done".
 
