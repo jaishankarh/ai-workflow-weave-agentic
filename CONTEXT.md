@@ -59,6 +59,16 @@ _Avoid:_ "staging" (the shared deploy target after merge), "sandbox" alone (the 
 ## Base branch
 The branch of a Repo that an Environment uses when the Story has no Task in that Repo (e.g. `dev`). Configured per Repo.
 
+## Checks
+The test suite, lint, typecheck and build of a Repo, run by the Dispatcher itself against an agent's work, never taken on an agent's word.
+_Avoid:_ "CI" (the Code host's own pipeline, which may run different things).
+
+## Finding
+One problem the review agent reports on a Task's change. Either **blocking** (a bug, an unmet spec item, a broken test, a breach of the Product's coding standards, a security issue) or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer.
+
+## Review passed
+A Task's change has no blocking Findings and its Checks are green.
+
 ## State
 A named, unambiguous stage of a Story or Task in the workflow graph (e.g. ready-for-agent, ready-for-human-review). Replaces the overloaded word "done".
 
