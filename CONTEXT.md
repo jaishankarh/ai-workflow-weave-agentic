@@ -16,7 +16,7 @@ The issue platform a Product uses (GitHub Issues, GitLab, Jira). Reached only th
 The mapping between canonical **States** and a Tracker's native labels, statuses and hierarchy.
 
 ## Story
-One idea, feature request or bug. May span Repos. Jira: L0 story. GitLab/GitHub: parent issue.
+One idea, feature request or bug. May span Repos, and names every Repo it touches. Lives in the Product's Tracker, never in a code Repo. Jira: L0 story, its Repos as components. GitLab: an issue in the Product's story repo, its Repos as labels.
 
 ## Task
 A sub-task of a Story. Touches **exactly one Repo** and produces **exactly one PR**. A Task needing two Repos is split.
