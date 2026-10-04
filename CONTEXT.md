@@ -26,6 +26,9 @@ A named, unambiguous stage of a Story or Task in the workflow graph (e.g. ready-
 
 A Story's State is set directly until its Tasks exist, is derived from its Tasks while they are built, and is set directly again after every Task is merged.
 
+## Invalid State
+A Story or Task whose Tracker shows no State or more than one. The Dispatcher never guesses a State from it: it flags the item and leaves it untouched until a human fixes it.
+
 ## Follow-up Story
 A new Story linked to an earlier one, created when work is discovered after the earlier Story was tasked.
 _Avoid:_ reopening the earlier Story or moving it back to grilling.
