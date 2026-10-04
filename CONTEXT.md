@@ -34,7 +34,14 @@ _Avoid:_ reopening the earlier Story or moving it back to grilling.
 A link saying a Story cannot go to staging until other work is merged. The other work is either a Task added to the same Story or a Follow-up Story. Work that is nice to have, rather than required, never becomes a Deploy blocker.
 
 ## Gate
-A State where the workflow waits for a human (grilling, triage, human review, merge).
+A State where the workflow waits for a human (grilling, triage, human review, merge). A Gate exists only as a State on the Tracker; nothing else holds a Story or Task's place while it waits.
+
+## Dispatcher
+The service that moves Stories and Tasks from one State to the next. It reads State from the Tracker and writes State back to it, but never holds State itself; what it keeps of its own is **Run bookkeeping**.
+
+## Run bookkeeping
+What the Dispatcher remembers about work in flight: agent run IDs, attempt counts, deploy batches. Never consulted to decide a State.
+_Avoid:_ "workflow state" for this.
 
 ## Grilling session
 A live, human-in-the-loop conversation held in the editor that turns a Story into specs and Tasks.
