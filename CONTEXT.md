@@ -22,7 +22,21 @@ The platform a Repo's code and PRs live on (GitLab, Bitbucket, GitHub). Independ
 The mapping between a Code host's PRs and the workflow: PR status, merge, and the PR's link back to its Task. Paired freely with any Tracker adapter.
 
 ## Story
-One idea, feature request or bug. May span Repos, and names every Repo it touches. Lives in the Product's Tracker, never in a code Repo. Jira: L0 story, its Repos as components. GitLab: an issue in the Product's story repo, its Repos as labels.
+One idea, feature request or bug. Has exactly one **Kind** and names at least one Repo from the moment it is created. May span Repos, and names every Repo it touches; grilling may change which. Lives in the Product's Tracker, never in a code Repo. Jira: L0 story, its Repos as components. GitLab: an issue in the Product's story repo, its Repos as labels.
+
+## Kind
+Whether a Story is a bug or a feature. Exactly one per Story, set at intake, changeable at triage.
+
+## Intake session
+A live, human-in-the-loop session in the editor where pasted meeting notes or transcripts (freeform, from any source) are split into Stories. Each item becomes a new Story, detail added to an existing Story, a Follow-up Story, or is left out; nothing reaches the Tracker until the human confirms it.
+_Avoid:_ "import", "ingest" (both suggest an unattended step).
+
+## Meeting notes
+Whatever the human pastes into an Intake session: a transcript, the client's own notes, a summary. Never an item in the Tracker; each Story created from them quotes its excerpt and carries the full notes as an attachment.
+
+## Parked
+A Story State for work recorded now but deliberately not started. The Dispatcher never acts on it; only a human moves it on, to triage.
+_Avoid:_ "backlog" (on most boards that means "next up").
 
 ## Task
 A sub-task of a Story. Touches **exactly one Repo** and produces **exactly one PR**. A Task needing two Repos is split. Lives under its Story in the Tracker and names its one Repo; the PR in that Repo links back to it. Jira: sub-task of the L0 story. GitLab: child task of the Story issue.
