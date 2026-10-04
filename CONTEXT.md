@@ -35,12 +35,15 @@ Evidence, captured by an agent from the running software, that one thing a Task'
 _Avoid:_ "logs" alone, "test results" as proof.
 
 ## Run recipe
-A file committed in a Repo that says how to bring that Repo's software up for capturing Proofs: what to build, which services it needs, what data to seed, which secrets it uses, and how to tell it is ready. Changes with the code, in the same PR. A Repo without a Run recipe cannot be proven: its spec items are "not provable here".
+A file committed in a Repo that says how to bring that Repo's software up in an **Environment**: what to build, which other Repos it depends on, which services it needs, what data to seed, which secrets it uses, and how to tell it is ready. Changes with the code, in the same PR. A Repo without a Run recipe cannot be run by agents: its spec items are "not provable here".
 _Avoid:_ "setup", "dev env" (both also mean a developer's machine).
 
-## Proof environment
-The isolated, throwaway place where one Story's software runs for one proof round: every Repo the Story touches at its Task's branch, plus the Repos their Run recipes depend on at main, brought up once as a single set. Every Proof of the round, for every Task of the Story, is captured in it one after another. Started once all of the Story's Tasks have passed agent review, and discarded when the round ends; a round after rework starts from a fresh one. Separate from the agent that captures Proofs in it.
-_Avoid:_ "staging" (that is the shared deploy target after merge), "sandbox" alone (the agent's own workspace).
+## Environment
+An isolated, throwaway set of containers running a Story's software for one agent run (implement, review or proofs), brought up from Run recipes and seeded fresh. Each Repo in it is at: the agent's working copy for the Task being worked on; the Task branch for any other Repo the Story touches; the **Base branch** for a Repo the Story does not touch. A proof round uses one Environment for every Proof of the Story, captured one after another, once all the Story's Tasks have passed agent review; a round after rework starts from a fresh one.
+_Avoid:_ "staging" (the shared deploy target after merge), "sandbox" alone (the agent's own workspace), "proof environment".
+
+## Base branch
+The branch of a Repo that an Environment uses when the Story has no Task in that Repo (e.g. `dev`). Configured per Repo.
 
 ## State
 A named, unambiguous stage of a Story or Task in the workflow graph (e.g. ready-for-agent, ready-for-human-review). Replaces the overloaded word "done".
