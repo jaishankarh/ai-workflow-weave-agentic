@@ -30,6 +30,10 @@ A sub-task of a Story. Touches **exactly one Repo** and produces **exactly one P
 ## PR
 The single change request a Task produces in its Repo. GitLab calls it a merge request (MR); the two words are interchangeable.
 
+## Proof
+Evidence, captured by an agent from the running software, that one thing a Task's spec asked for works: screenshots or a recording for UI, the request, response and server log lines for an API, the command and its output for a CLI or job. A test-run report travels with Proofs but is never a Proof on its own. A Proof that shows the thing failing is a defect, not a Proof.
+_Avoid:_ "logs" alone, "test results" as proof.
+
 ## State
 A named, unambiguous stage of a Story or Task in the workflow graph (e.g. ready-for-agent, ready-for-human-review). Replaces the overloaded word "done".
 
