@@ -19,7 +19,7 @@ The mapping between canonical **States** and a Tracker's labels and hierarchy. A
 The platform a Repo's code and PRs live on (GitLab, Bitbucket, GitHub). Independent of the Tracker: a Jira Product may keep its Repos on Bitbucket and GitLab.
 
 ## Code host adapter
-The mapping between a Code host's PRs and the workflow: PR status, merge, and the PR's link back to its Task. Paired freely with any Tracker adapter.
+The mapping between a Code host's PRs and the workflow: PR status, merge, and the PR's links back to its Tasks. Paired freely with any Tracker adapter.
 
 ## Story
 One idea, feature request or bug. Has exactly one **Kind** and names at least one Repo from the moment it is created. May span Repos, and names every Repo it touches; grilling may change which. Lives in the Product's Tracker, never in a code Repo. Jira: L0 story, its Repos as components. GitLab: an issue in the Product's story repo, its Repos as labels.
@@ -39,10 +39,14 @@ A Story State for work recorded now but deliberately not started. The Dispatcher
 _Avoid:_ "backlog" (on most boards that means "next up").
 
 ## Task
-A sub-task of a Story. Touches **exactly one Repo** and produces **exactly one PR**. A Task needing two Repos is split. Lives under its Story in the Tracker and names its one Repo; the PR in that Repo links back to it. Jira: sub-task of the L0 story. GitLab: child task of the Story issue.
+A sub-task of a Story, and one ticket of the Story's spec. Touches **exactly one Repo**; a Task needing two Repos is split. A Story may have several Tasks in the same Repo, and they all land in that Repo's one PR for the Story. Lives under its Story in the Tracker and names its one Repo; the PR in that Repo links back to it. Jira: sub-task of the L0 story. GitLab: child task of the Story issue.
 
 ## PR
-The single change request a Task produces in its Repo. GitLab calls it a merge request (MR); the two words are interchangeable.
+The single change request a Story produces in one Repo, opened from that Repo's **Integration branch** and covering every Task of the Story in that Repo. The unit of human review and merge. GitLab calls it a merge request (MR); the two words are interchangeable.
+_Avoid:_ "the Task's PR" (a PR may carry several Tasks).
+
+## Integration branch
+The one branch per Story per Repo into which every Task of that Story in that Repo is merged as it is built. A PR is opened from it.
 
 ## Proof
 Evidence, captured by an agent from the running software, that one thing a Task's spec asked for works: screenshots or a recording for UI, the request, response and server log lines for an API, the command and its output for a CLI or job. A test-run report travels with Proofs but is never a Proof on its own. A Proof that shows the thing failing is a defect, not a Proof.
