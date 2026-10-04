@@ -75,7 +75,10 @@ _Avoid:_ "code review" alone (also names the implementer's self-review and the h
 One problem the Agent review reports on a Task's change. Either **blocking** (a bug, an unmet spec item, a broken test, a breach of the Product's coding standards, a security issue) or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer.
 
 ## Review passed
-A Task's change has no blocking Findings and its Checks are green.
+A Story's PRs have no blocking Findings and their Checks are green.
+
+## Review round
+One pass of a Story's review → fix loop: a fix run, then Checks, then Agent review. Counted on the Tracker from the Story's comments since the loop last started; the loop starts afresh only on a failing Proof, a human rejection at review, or a human moving the Story out of needs-human.
 
 ## State
 A named, unambiguous stage of a Story or Task in the workflow graph (e.g. ready-for-agent, ready-for-human-review). Replaces the overloaded word "done".
@@ -103,7 +106,7 @@ A named pairing of an agent (e.g. Cursor, Claude Code, or a model-agnostic loop)
 _Avoid:_ "agent" alone when the model matters too.
 
 ## Run bookkeeping
-What the Dispatcher remembers about work in flight: agent run IDs, attempt counts, deploy batches. Never consulted to decide a State.
+What the Dispatcher remembers about work in flight: agent run IDs, infrastructure retry counts, deploy batches. Never consulted to decide a State; anything that decides one, such as Review rounds, is kept on the Tracker instead.
 _Avoid:_ "workflow state" for this.
 
 ## Grilling session
