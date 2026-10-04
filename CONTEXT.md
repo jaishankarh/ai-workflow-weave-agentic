@@ -39,7 +39,7 @@ A file committed in a Repo that says how to bring that Repo's software up for ca
 _Avoid:_ "setup", "dev env" (both also mean a developer's machine).
 
 ## Proof environment
-The isolated, throwaway place where one Story's software runs for one proof round: every Repo the Story touches at its Task's branch, brought up from their Run recipes. Started once all of the Story's Tasks have passed agent review, and discarded after the round. Separate from the agent that captures Proofs in it.
+The isolated, throwaway place where one Story's software runs for one proof round: every Repo the Story touches at its Task's branch, plus the Repos their Run recipes depend on at main, brought up once as a single set. Every Proof of the round, for every Task of the Story, is captured in it one after another. Started once all of the Story's Tasks have passed agent review. Separate from the agent that captures Proofs in it.
 _Avoid:_ "staging" (that is the shared deploy target after merge), "sandbox" alone (the agent's own workspace).
 
 ## State
