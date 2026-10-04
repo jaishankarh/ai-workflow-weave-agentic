@@ -19,7 +19,10 @@ The mapping between canonical **States** and a Tracker's native labels, statuses
 One idea, feature request or bug. May span Repos, and names every Repo it touches. Lives in the Product's Tracker, never in a code Repo. Jira: L0 story, its Repos as components. GitLab: an issue in the Product's story repo, its Repos as labels.
 
 ## Task
-A sub-task of a Story. Touches **exactly one Repo** and produces **exactly one PR**. A Task needing two Repos is split.
+A sub-task of a Story. Touches **exactly one Repo** and produces **exactly one PR**. A Task needing two Repos is split. Lives under its Story in the Tracker and names its one Repo; the PR in that Repo links back to it. Jira: sub-task of the L0 story. GitLab: child task of the Story issue.
+
+## PR
+The single change request a Task produces in its Repo. GitLab calls it a merge request (MR); the two words are interchangeable.
 
 ## State
 A named, unambiguous stage of a Story or Task in the workflow graph (e.g. ready-for-agent, ready-for-human-review). Replaces the overloaded word "done".
