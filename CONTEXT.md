@@ -67,8 +67,12 @@ The branch of a Repo that an Environment uses when the Story has no Task in that
 The test suite, lint, typecheck and build of a Repo, run by the Dispatcher itself against an agent's work, never taken on an agent's word.
 _Avoid:_ "CI" (the Code host's own pipeline, which may run different things).
 
+## Agent review
+The workflow step, after implementation, in which a separate agent run (its own Agent profile, preferably a different model from the implementer's) reviews all of a Story's PRs and reports Findings. Distinct from any review an implement run does of its own work before it finishes, which is part of implementing and never decides a State.
+_Avoid:_ "code review" alone (also names the implementer's self-review and the human's review).
+
 ## Finding
-One problem the review agent reports on a Task's change. Either **blocking** (a bug, an unmet spec item, a broken test, a breach of the Product's coding standards, a security issue) or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer.
+One problem the Agent review reports on a Task's change. Either **blocking** (a bug, an unmet spec item, a broken test, a breach of the Product's coding standards, a security issue) or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer.
 
 ## Review passed
 A Task's change has no blocking Findings and its Checks are green.
