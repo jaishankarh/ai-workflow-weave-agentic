@@ -36,6 +36,7 @@ Needs Docker, Python 3.12+, and network access to `ghcr.io` and `cursor.com`.
    unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL   # these silently override the OAuth token
    python spike.py --agent all
    ```
+   Results are saved after every check, so a Ctrl-C keeps what's done. The last check (bad token) deliberately spends 1–2 minutes on `401 Invalid bearer token` retries before failing; that's expected, not a hang. To rerun only some checks: `python spike.py --agent cursor --checks auth,skills`.
 4. **Post `results-claude-code.json` and `results-cursor.json`** as a comment on the ticket (or commit them on this branch). Also say whether either agent popped up anything in a browser or on your screen (it shouldn't).
 5. **Optional, only if an account is near its limit anyway:** run `python spike.py --agent <that one>` again while limited, so `error_events` captures the real quota failure. Don't burn quota just for this.
 

@@ -204,23 +204,41 @@ def check_skills(ws, spec, token, res):
     }
 
 
+SLEEP = "sleep 300"
+PS_SLEEP = "ps -eo pid,args | grep -v grep | grep 'sleep 300' || true"
+PS_AGENT = "ps -eo pid,args | grep -Ei 'claude|agent acp|cursor' | grep -v grep || true"
+
+
 def check_cancel(ws, spec, token, res):
+    """Interrupt a turn while the agent is blocked on a foreground command.
+
+    Claude Code moves any command it expects to outlast its 10-minute tool
+    timeout into the background and ends the turn, leaving nothing to
+    interrupt, so the command is kept under that limit and asked for in the
+    foreground. Whether a background command outlives the run is recorded too.
+    """
+    sh(ws, "pkill -f 'sleep 300' || true; rm -f late.txt")
     conv = new_conversation(ws, spec, token)
     out: dict[str, Any] = {}
     try:
         conv.send_message(
-            "Use your shell tool to run exactly this command and wait for it to finish: "
-            "sleep 901 && echo late > late.txt"
+            "Use your shell tool to run this command in the FOREGROUND (do not run it in "
+            "the background; set the tool timeout to 10 minutes) and wait for it to finish: "
+            f"{SLEEP} && echo late > late.txt"
         )
         conv.run(blocking=False)
         seen = False
         for _ in range(60):  # up to ~3 minutes for the agent to start the command
-            if "sleep 901" in sh(ws, "ps -eo pid,args | grep -v grep | grep 'sleep 901' || true"):
+            if "sleep 300" in sh(ws, PS_SLEEP):
                 seen = True
                 break
             time.sleep(3)
         out["sleep_started"] = seen
-        out["agent_procs_before"] = sh(ws, "ps -eo pid,args | grep -Ei 'claude|agent acp|cursor' | grep -v grep || true")[:800]
+        status_before = str(conv.state.execution_status)
+        out["status_before_interrupt"] = status_before
+        # Background run = the turn already ended with the command still going.
+        out["agent_backgrounded_it"] = seen and "RUNNING" not in status_before.upper()
+        out["agent_procs_before"] = sh(ws, PS_AGENT)[:800]
         t0 = time.time()
         conv.interrupt()
         status = None
@@ -232,8 +250,8 @@ def check_cancel(ws, spec, token, res):
         out["status_after_interrupt"] = status
         out["seconds_to_stop"] = round(time.time() - t0, 1)
         time.sleep(5)
-        out["sleep_still_running"] = "sleep 901" in sh(ws, "ps -eo pid,args | grep -v grep | grep 'sleep 901' || true")
-        out["agent_procs_after"] = sh(ws, "ps -eo pid,args | grep -Ei 'claude|agent acp|cursor' | grep -v grep || true")[:800]
+        out["sleep_still_running_after_interrupt"] = "sleep 300" in sh(ws, PS_SLEEP)
+        out["agent_procs_after"] = sh(ws, PS_AGENT)[:800]
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"[:600]
     finally:
@@ -242,21 +260,52 @@ def check_cancel(ws, spec, token, res):
             conv.close()
         except Exception:
             pass
-    out["agent_procs_after_close"] = sh(ws, "ps -eo pid,args | grep -Ei 'claude|agent acp|cursor' | grep -v grep || true")[:800]
-    out["pass"] = bool(out.get("sleep_started")) and out.get("sleep_still_running") is False
+    time.sleep(3)
+    out["sleep_still_running_after_close"] = "sleep 300" in sh(ws, PS_SLEEP)
+    out["agent_procs_after_close"] = sh(ws, PS_AGENT)[:800]
+    out["pass"] = (
+        bool(out.get("sleep_started"))
+        and not out.get("agent_backgrounded_it")
+        and out.get("sleep_still_running_after_interrupt") is False
+    )
+    sh(ws, "pkill -f 'sleep 300' || true")
     res.checks["cancel"] = out
 
 
-def check_bad_token(ws, spec, res):
-    """What an auth failure looks like, so the wrapper can tell it from quota."""
-    reply, info = ask(ws, spec, "invalid-token-for-spike", res, "Reply with exactly: SPIKE-OK", timeout=240)
-    res.checks["bad_token"] = {"reply": reply[:200], "info": info}
+def check_bad_token(ws, spec, token, res):  # noqa: ARG001 - deliberately ignores the real token
+    """What an auth failure looks like, so the wrapper can tell it from quota.
+
+    The SDK retries a failed prompt 3 times with backoff before giving up, so
+    this takes 1-2 minutes. That delay is itself a finding.
+    """
+    print(f"[{spec.key}]   (expected: ~1-2 min of '401' retries, then it fails)", flush=True)
+    t0 = time.time()
+    reply, info = ask(ws, spec, "invalid-token-for-spike", res, "Reply with exactly: SPIKE-OK", timeout=300)
+    res.checks["bad_token"] = {
+        "reply": reply[:300],
+        "info": info,
+        "seconds_to_fail": round(time.time() - t0, 1),
+    }
 
 
 # --------------------------------------------------------------------------- main
 
+CHECKS = {
+    "auth": check_auth,
+    "permissions": check_permissions,
+    "skills": check_skills,
+    "cancel": check_cancel,
+    "bad_token": check_bad_token,
+}
 
-def run_agent(spec: AgentSpec) -> Result:
+
+def save(res: Result) -> Path:
+    out = HERE / f"results-{res.agent}.json"
+    out.write_text(json.dumps(res.__dict__, indent=2, default=str))
+    return out
+
+
+def run_agent(spec: AgentSpec, checks: list[str]) -> Result:
     token = os.environ.get(spec.secret_env)
     if not token:
         sys.exit(f"{spec.secret_env} is not set; see README.md")
@@ -267,15 +316,18 @@ def run_agent(spec: AgentSpec) -> Result:
             container_id = ws._container_id
             res.versions = sh(ws, spec.version_cmd).strip()
             stage(ws)
-            for check in (check_auth, check_permissions, check_skills, check_cancel):
-                print(f"[{spec.key}] {check.__name__} ...", flush=True)
+            for name in checks:
+                print(f"[{spec.key}] {name} ...", flush=True)
                 try:
-                    check(ws, spec, token, res)
+                    CHECKS[name](ws, spec, token, res)
                 except Exception:
-                    res.checks[check.__name__.removeprefix("check_")] = {"error": traceback.format_exc()[-800:]}
-                print(f"[{spec.key}]   -> {res.checks.get(check.__name__.removeprefix('check_'), {}).get('pass')}", flush=True)
-            print(f"[{spec.key}] check_bad_token ...", flush=True)
-            check_bad_token(ws, spec, res)
+                    res.checks[name] = {"error": traceback.format_exc()[-800:]}
+                print(f"[{spec.key}]   -> pass={res.checks.get(name, {}).get('pass')}", flush=True)
+                save(res)  # keep what is done if the run is stopped
+    except KeyboardInterrupt:
+        res.checks["_stopped"] = "run interrupted with Ctrl-C"
+        save(res)
+        raise
     finally:
         if container_id:
             left = subprocess.run(
@@ -283,19 +335,28 @@ def run_agent(spec: AgentSpec) -> Result:
                 capture_output=True, text=True,
             ).stdout.strip()
             res.container_removed = left == ""
+            if left:
+                print(f"container {container_id[:12]} still exists; remove it with: docker rm -f {container_id[:12]}")
+        save(res)
     return res
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--agent", choices=[*AGENTS, "all"], default="all")
+    p.add_argument(
+        "--checks", default=",".join(CHECKS),
+        help=f"comma-separated subset of: {','.join(CHECKS)}",
+    )
     args = p.parse_args()
+    checks = [c.strip() for c in args.checks.split(",") if c.strip()]
+    bad = [c for c in checks if c not in CHECKS]
+    if bad:
+        sys.exit(f"unknown checks: {bad}")
     keys = list(AGENTS) if args.agent == "all" else [args.agent]
     for key in keys:
-        res = run_agent(AGENTS[key])
-        out = HERE / f"results-{key}.json"
-        out.write_text(json.dumps(res.__dict__, indent=2, default=str))
-        print(f"wrote {out}")
+        res = run_agent(AGENTS[key], checks)
+        print(f"wrote {save(res)}")
 
 
 if __name__ == "__main__":
