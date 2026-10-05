@@ -133,6 +133,14 @@ A State where the workflow waits for a human (grilling, triage, human review, me
 ## Dispatcher
 The deterministic service that moves Stories and Tasks from one State to the next; one per Product. It starts agent runs and Checks and collects their outcomes, but never judges code itself and never waits on a run. It reads State from the Tracker and writes State back to it, but never holds State itself; what it keeps of its own is **Run bookkeeping**.
 
+## Sandbox host
+The one machine where every agent sandbox and Environment runs, shared by all Products, each Product capped in how many runs it may have at once. The Dispatchers live on it too.
+_Avoid:_ "server" alone, "staging" (the shared deploy target after merge).
+
+## Run dashboard
+A read-only page each Dispatcher serves showing its Run bookkeeping: live, queued and retried runs, their Agent profiles, durations, logs and cost. Never a place to act: every human action, from approving to restarting, happens on the Tracker.
+_Avoid:_ "console", "control panel" (both suggest it can change things).
+
 ## Agent profile
 A named pairing of an agent (e.g. Cursor, Claude Code, or a model-agnostic loop) and a model, used for an agent run. A Product sets a default Agent profile per workflow node; a Task may override it.
 _Avoid:_ "agent" alone when the model matters too.
