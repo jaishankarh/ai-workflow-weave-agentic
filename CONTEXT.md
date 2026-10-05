@@ -56,11 +56,14 @@ _Avoid:_ "test point", "unit" (both invite testing internals).
 The one branch per Story per Repo into which every Task of that Story in that Repo is merged as it is built. A PR is opened from it.
 
 ## Proof
-Evidence, captured by an agent from the running software, that one thing a Task's spec asked for works: screenshots or a recording for UI, the request, response and server log lines for an API, the command and its output for a CLI or job. A test-run report travels with Proofs but is never a Proof on its own. A Proof that shows the thing failing is a defect, not a Proof.
-_Avoid:_ "logs" alone, "test results" as proof.
+Evidence, captured by an agent from the running software, that one Acceptance criterion works: screenshots or a recording for UI, the request, response and server log lines for an API, the command and its output for a CLI or job. Every Acceptance criterion has one, unless it is Not provable here. A test-run report travels with Proofs but is never a Proof on its own. A Proof that shows the thing failing is a defect, not a Proof. An Acceptance criterion the proofs agent cannot prove counts as a failing Proof.
+_Avoid:_ "logs" alone, "test results" as proof, "spec item" (say Acceptance criterion).
+
+## Not provable here
+A mark on an Acceptance criterion saying no agent can capture its Proof, so a human checks it at review instead. Set only in the Grilling session, never by an agent, and only for a fixed list of reasons: the Repo has no Run recipe; it needs iOS; it is mobile UI while Environments cannot run an Android emulator; or it depends on an outside system that has no test account or sandbox. The criterion is still tested.
 
 ## Run recipe
-A file committed in a Repo that says how to bring that Repo's software up in an **Environment**: what to build, which other Repos it depends on, which services it needs, what data to seed, which secrets it uses, and how to tell it is ready. Changes with the code, in the same PR. A Repo without a Run recipe cannot be run by agents: its spec items are "not provable here".
+A file committed in a Repo that says how to bring that Repo's software up in an **Environment**: what to build, which other Repos it depends on, which services it needs, what data to seed, which secrets it uses, and how to tell it is ready. Changes with the code, in the same PR. A Repo without a Run recipe cannot be run by agents: its Acceptance criteria are **Not provable here**.
 _Avoid:_ "setup", "dev env" (both also mean a developer's machine).
 
 ## Environment
@@ -79,7 +82,7 @@ The workflow step, after implementation, in which a separate agent run (its own 
 _Avoid:_ "code review" alone (also names the implementer's self-review and the human's review).
 
 ## Finding
-One problem the Agent review reports on a Task's change. Either **blocking** (a bug, an unmet spec item, a broken test, a breach of the Product's coding standards, a security issue) or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer.
+One problem the Agent review reports on a Task's change. Either **blocking** (a bug, an unmet Acceptance criterion, a broken test, a breach of the Product's coding standards, a security issue) or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer.
 
 ## Review passed
 A Story's PRs have no blocking Findings and their Checks are green.
