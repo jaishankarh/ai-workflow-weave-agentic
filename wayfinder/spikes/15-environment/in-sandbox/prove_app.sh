@@ -7,7 +7,13 @@ set -uo pipefail
 APK="$1"; PKG="$2"; EXPECT="${3:-}"
 mkdir -p /tmp/proof
 
+before=$(adb shell pm list packages -3 2>/dev/null | tr -d '\r' | sort)
 adb install -r -g "$APK" >/tmp/proof/install.log 2>&1 || { cat /tmp/proof/install.log; echo '{"ok":false,"stage":"install"}'; exit 1; }
+# If the build step could not read the package name, take the one the install added.
+if [ -z "$PKG" ]; then
+  PKG=$(comm -13 <(echo "$before") <(adb shell pm list packages -3 | tr -d '\r' | sort) | head -1 | sed 's/^package://')
+fi
+[ -n "$PKG" ] || { echo '{"ok":false,"stage":"package-name"}'; exit 1; }
 adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
 
 found=false
@@ -20,5 +26,5 @@ done
 adb exec-out screencap -p > /tmp/proof/screen.png
 on_screen=$(grep -o 'text="[^"]*"' /tmp/proof/ui.xml 2>/dev/null | head -20 | tr '\n' ' ' | sed 's/"/\\"/g')
 ok=$found; [ -z "$EXPECT" ] && ok=true
-printf '{"ok":%s,"expected_text_on_screen":%s,"screenshot_bytes":%s,"visible_text":"%s"}\n' \
-  "$ok" "$found" "$(stat -c %s /tmp/proof/screen.png 2>/dev/null || echo 0)" "$on_screen"
+printf '{"ok":%s,"package":"%s","expected_text_on_screen":%s,"screenshot_bytes":%s,"visible_text":"%s"}\n' \
+  "$ok" "$PKG" "$found" "$(stat -c %s /tmp/proof/screen.png 2>/dev/null || echo 0)" "$on_screen"

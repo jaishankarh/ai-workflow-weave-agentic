@@ -59,7 +59,11 @@ cd "$APP/android"
   || { tail -n 60 /tmp/gradle.log; exit 1; }
 
 APK=$(ls -1 "$APP"/android/app/build/outputs/apk/release/*.apk | head -1)
-PKG=$("$ANDROID_HOME"/build-tools/*/aapt2 dump packagename "$APK" 2>/dev/null | head -1 || true)
+# Several build-tools versions may be installed (Gradle adds its own), so pick one aapt2.
+AAPT2=$(ls -1d "$ANDROID_HOME"/build-tools/*/aapt2 2>/dev/null | sort -V | tail -1)
+PKG=$("$AAPT2" dump packagename "$APK" 2>/dev/null | head -1 || true)
+# Fallback: the applicationId in the app's Gradle file.
+[ -n "$PKG" ] || PKG=$(grep -hoE 'applicationId[ =]+"[^"]+"' "$APP"/android/app/build.gradle* 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)"/\1/' || true)
 RNV=$(node -p "require('$APP/node_modules/react-native/package.json').version" 2>/dev/null || echo unknown)
 printf '{"ok":true,"apk":"%s","apk_bytes":%s,"package":"%s","react_native":"%s"}\n' \
   "$APK" "$(stat -c %s "$APK")" "$PKG" "$RNV"
