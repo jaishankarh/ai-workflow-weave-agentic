@@ -1,0 +1,59 @@
+{
+  "agent": "cursor",
+  "started_at": "2026-10-06T02:57:38+0530",
+  "versions": "2026.10.01-e373342",
+  "checks": {
+    "auth": {
+      "pass": true,
+      "reply": "SPIKE-OK",
+      "info": "finished in 16.0s"
+    },
+    "permissions": {
+      "pass": true,
+      "file": "perm-ok\nMon Oct  5 21:28:21 UTC 2026",
+      "reply": "I'll run that command exactly, then reply DONE.DONE",
+      "info": "finished in 18.0s"
+    },
+    "skills": {
+      "pass": true,
+      "loaded": {
+        ".claude/skills": true,
+        ".agents/skills": true,
+        ".cursor/skills": true,
+        "CLAUDE.md": false,
+        "AGENTS.md": false
+      },
+      "reply": "I'll look for every skill whose name starts with `canary-` and follow each one exactly.I found three canary skills. I'll append the line each one specifies to `canary.txt`.Skills found:\n\n- canary-cursor\n- canary-agents\n- canary-claude",
+      "info": "finished in 28.0s"
+    },
+    "cancel": {
+      "sleep_started": true,
+      "status_before_interrupt": "ConversationExecutionStatus.RUNNING",
+      "agent_backgrounded_it": false,
+      "agent_procs_before": "    138 /opt/cursor/.local/share/cursor-agent/versions/2026.10.01-e373342/node /opt/cursor/.local/share/cursor-agent/versions/2026.10.01-e373342/index.js worker-server\n    551 /usr/local/bin/agent --use-system-ca /opt/cursor/.local/share/cursor-agent/versions/2026.10.01-e373342/index.js acp\n    670 /usr/bin/bash -O extglob -c snap=$(command cat <&3) && builtin shopt -s extglob && builtin eval -- \"$snap\" && { builtin set +u 2>/dev/null || true; builtin eval \"${__CURSOR_SANDBOX_ENV_RESTORE:-}\" 2>/dev/null; builtin eval \"${__CURSOR_SANDBOX_TEMP_RESTORE:-}\" 2>/dev/null; builtin export PWD=\"$(builtin pwd)\"; builtin shopt -s expand_aliases 2>/dev/null; builtin eval \"$1\" < /dev/null; }; COMMAND_EXIT_CODE=$?; dump_bash_state >&4; builtin exit $COMMAND_EXIT_CODE -- sleep 300 && echo late > late.txt",
+      "status_after_interrupt": "ConversationExecutionStatus.PAUSED",
+      "seconds_to_stop": 2.1,
+      "sleep_still_running_after_interrupt": false,
+      "agent_procs_after": "    138 /opt/cursor/.local/share/cursor-agent/versions/2026.10.01-e373342/node /opt/cursor/.local/share/cursor-agent/versions/2026.10.01-e373342/index.js worker-server\n    551 /usr/local/bin/agent --use-system-ca /opt/cursor/.local/share/cursor-agent/versions/2026.10.01-e373342/index.js acp\n",
+      "sleep_still_running_after_close": false,
+      "agent_procs_after_close": "    138 /opt/cursor/.local/share/cursor-agent/versions/2026.10.01-e373342/node /opt/cursor/.local/share/cursor-agent/versions/2026.10.01-e373342/index.js worker-server\n",
+      "pass": true
+    },
+    "bad_token": {
+      "reply": "",
+      "info": "error in 6.0s",
+      "seconds_to_fail": 11.1
+    }
+  },
+  "error_events": [
+    {
+      "code": "ACPInitError",
+      "detail": "[-32603] Internal error: Failed to initialize session services"
+    },
+    {
+      "code": "RequestError",
+      "detail": "Internal error"
+    }
+  ],
+  "container_removed": false
+}

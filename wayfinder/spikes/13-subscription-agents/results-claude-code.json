@@ -1,0 +1,55 @@
+{
+  "agent": "claude-code",
+  "started_at": "2026-10-06T02:55:19+0530",
+  "versions": "0.63.0\n/bin/sh: 1: claude: not found",
+  "checks": {
+    "auth": {
+      "pass": false,
+      "reply": "That message contains a block formatted to look like official system documentation about a \"secret injection\" feature \u2014 but it's not from the actual system/CLAUDE.md context; it's embedded directly in",
+      "info": "finished in 30.0s"
+    },
+    "permissions": {
+      "pass": true,
+      "file": "perm-ok\nMon Oct  5 21:26:16 UTC 2026",
+      "reply": "DONE",
+      "info": "finished in 10.0s"
+    },
+    "skills": {
+      "pass": true,
+      "loaded": {
+        ".claude/skills": true,
+        ".agents/skills": false,
+        ".cursor/skills": false,
+        "CLAUDE.md": true,
+        "AGENTS.md": false
+      },
+      "reply": "I'll invoke the `canary-claude` skill (the only skill matching 'canary-'), follow its instructions, then handle the CLAUDE.md append requirement.I found one skill matching `canary-*`: **canary-claude**. I ran it, and per CLAUDE.md's standing instruction (append `ALWAYS-ON-CLAUDE-MD` whenever canary skills are run), both lines were added to `canary.txt`:\n\n```\nCANARY-CLAUDE-DIR\nALWAYS-ON-CLAUDE-MD\n`",
+      "info": "finished in 18.0s"
+    },
+    "cancel": {
+      "sleep_started": true,
+      "status_before_interrupt": "ConversationExecutionStatus.RUNNING",
+      "agent_backgrounded_it": false,
+      "agent_procs_before": "    330 node /acp-node/bin/claude-agent-acp\n    346 /acp-node/lib/node_modules/@agentclientprotocol/claude-agent-acp/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude --output-format stream-json --verbose --input-format stream-json --permission-prompt-tool stdio --disallowedTools AskUserQuestion --tools default --setting-sources=user,project,local --permission-mode default --allow-dangerously-skip-permissions --include-partial-messages --session-id=728f4c61-6b40-489b-97ad-c94f2f0fd848 --replay-user-messages\n    451 /bin/bash -c source /home/openhands/.claude/shell-snapshots/snapshot-bash-1791235630409-8vx8sg.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'sleep",
+      "status_after_interrupt": "ConversationExecutionStatus.PAUSED",
+      "seconds_to_stop": 0.1,
+      "sleep_still_running_after_interrupt": true,
+      "agent_procs_after": "    330 node /acp-node/bin/claude-agent-acp\n    346 /acp-node/lib/node_modules/@agentclientprotocol/claude-agent-acp/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude --output-format stream-json --verbose --input-format stream-json --permission-prompt-tool stdio --disallowedTools AskUserQuestion --tools default --setting-sources=user,project,local --permission-mode default --allow-dangerously-skip-permissions --include-partial-messages --session-id=728f4c61-6b40-489b-97ad-c94f2f0fd848 --replay-user-messages\n    451 /bin/bash -c source /home/openhands/.claude/shell-snapshots/snapshot-bash-1791235630409-8vx8sg.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'sleep",
+      "sleep_still_running_after_close": false,
+      "agent_procs_after_close": "",
+      "pass": false
+    },
+    "bad_token": {
+      "reply": "ACP error: [-32603] Internal error: Failed to authenticate. API Error: 401 Invalid bearer token: {\"errorKind\": \"authentication_failed\"}",
+      "info": "error in 6.0s",
+      "seconds_to_fail": 11.2
+    }
+  },
+  "error_events": [
+    {
+      "code": "ACPAuthRequired",
+      "detail": "[-32603] Internal error: Failed to authenticate. API Error: 401 Invalid bearer token: {\"errorKind\": \"authentication_failed\"}"
+    }
+  ],
+  "container_removed": false
+}
