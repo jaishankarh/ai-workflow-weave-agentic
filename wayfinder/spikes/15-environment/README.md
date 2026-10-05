@@ -17,7 +17,13 @@ Ticket: [Prove an Environment runs nested Docker and an Android emulator under O
 
 Every check has `seconds`, so boot times come out of the same file.
 
-## Host you need
+## Default: GitHub Actions (no machine needed)
+
+[`.github/workflows/spike-15-environment.yml`](../../../.github/workflows/spike-15-environment.yml) runs everything below on a GitHub-hosted Ubuntu runner: a full throwaway VM with sudo and KVM, so it can install sysbox and accelerate the emulator. It runs on every push to this branch that touches the spike, and on manual dispatch (optionally with `rn_app_repo` to also time a real app). It posts the results summary as a comment on the ticket and uploads the screenshot as the `spike-15-results` artifact.
+
+Codespaces is not a substitute: a Codespace is a dev container on a VM we don't control, so sysbox can't be installed in it.
+
+## Host you need (to run it yourself instead)
 
 A **Linux x86_64 machine with KVM**: bare metal, or a cloud VM with nested virtualization. Docker Desktop on macOS or Windows cannot do this (no sysbox, no `/dev/kvm`), and neither can this cloud workspace (no `/dev/kvm`, no virtualization flags, no image pulls).
 
