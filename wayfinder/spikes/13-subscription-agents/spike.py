@@ -28,12 +28,17 @@ import os
 import subprocess
 import sys
 import time
+import logging
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
+# Forwarded into the sandbox: make the agent-server fail a prompt at once
+# instead of retrying it 3 times with backoff (keeps every check short).
+os.environ.setdefault("ACP_PROMPT_MAX_RETRIES", "0")
+logging.getLogger("openhands").setLevel(logging.ERROR)
 
 from openhands.sdk import Conversation  # noqa: E402
 from openhands.sdk.agent import ACPAgent  # noqa: E402
@@ -129,12 +134,15 @@ def new_conversation(ws: DockerWorkspace, spec: AgentSpec, token: str):
     agent = ACPAgent(
         acp_command=spec.acp_command,
         acp_session_mode=spec.session_mode,
-        acp_startup_timeout=180.0,
-        acp_prompt_timeout=900.0,
+        acp_startup_timeout=120.0,
+        acp_prompt_timeout=300.0,
     )
     # Passed as a conversation secret: becomes an env var of the ACP subprocess
     # only, never baked into the image, masked in any output.
-    return Conversation(agent=agent, workspace=ws, secrets={spec.secret_env: token})
+    return Conversation(
+        agent=agent, workspace=ws, secrets={spec.secret_env: token},
+        visualizer=None,  # no per-event panels; the harness prints its own progress
+    )
 
 
 def collect_errors(conv, res: Result) -> None:
@@ -145,14 +153,41 @@ def collect_errors(conv, res: Result) -> None:
                 res.error_events.append(item)
 
 
-def ask(ws, spec, token, res, prompt: str, timeout: float = 900) -> tuple[str, str | None]:
+TERMINAL = ("finished", "error", "stuck", "paused")
+
+
+def wait(conv, label: str, timeout: float) -> str:
+    """Run without blocking, print progress every 15s, hard-stop at timeout."""
+    conv.run(blocking=False)
+    t0 = time.time()
+    last = 0.0
+    status = ""
+    while True:
+        status = str(conv.state.execution_status).split(".")[-1].lower()
+        elapsed = time.time() - t0
+        if elapsed > 5 and status in TERMINAL:
+            return status
+        if elapsed > timeout:
+            print(f"    {label}: no result after {timeout:.0f}s, interrupting", flush=True)
+            try:
+                conv.interrupt()
+            except Exception:
+                pass
+            return f"timeout({status})"
+        if elapsed - last >= 15:
+            print(f"    {label}: {status} {elapsed:.0f}s", flush=True)
+            last = elapsed
+        time.sleep(2)
+
+
+def ask(ws, spec, token, res, prompt: str, timeout: float = 300, label: str = "") -> tuple[str, str | None]:
     conv = new_conversation(ws, spec, token)
     try:
         conv.send_message(prompt)
         t0 = time.time()
-        conv.run(timeout=timeout)
+        status = wait(conv, label or spec.key, timeout)
         reply = get_agent_final_response(conv.state.events) or ""
-        return reply, f"{time.time() - t0:.1f}s"
+        return reply, f"{status} in {time.time() - t0:.1f}s"
     except Exception as e:  # recorded, not raised: we want every check's outcome
         return "", f"ERROR {type(e).__name__}: {e}"[:600]
     finally:
@@ -275,12 +310,12 @@ def check_cancel(ws, spec, token, res):
 def check_bad_token(ws, spec, token, res):  # noqa: ARG001 - deliberately ignores the real token
     """What an auth failure looks like, so the wrapper can tell it from quota.
 
-    The SDK retries a failed prompt 3 times with backoff before giving up, so
-    this takes 1-2 minutes. That delay is itself a finding.
+    Retries are switched off (ACP_PROMPT_MAX_RETRIES=0); by default the SDK
+    retries a 401 three times with backoff, which is itself a finding.
     """
-    print(f"[{spec.key}]   (expected: ~1-2 min of '401' retries, then it fails)", flush=True)
+    print(f"[{spec.key}]   (expected: fails in under a minute)", flush=True)
     t0 = time.time()
-    reply, info = ask(ws, spec, "invalid-token-for-spike", res, "Reply with exactly: SPIKE-OK", timeout=300)
+    reply, info = ask(ws, spec, "invalid-token-for-spike", res, "Reply with exactly: SPIKE-OK", timeout=120, label="bad_token")
     res.checks["bad_token"] = {
         "reply": reply[:300],
         "info": info,
@@ -312,7 +347,12 @@ def run_agent(spec: AgentSpec, checks: list[str]) -> Result:
     res = Result(agent=spec.key)
     container_id = None
     try:
-        with DockerWorkspace(server_image=IMAGE, working_dir=WORKDIR) as ws:
+        with DockerWorkspace(
+            server_image=IMAGE,
+            working_dir=WORKDIR,
+            detach_logs=False,  # keep the container's own log off the console
+            forward_env=["DEBUG", "SESSION_API_KEY", "OH_SESSION_API_KEYS_0", "ACP_PROMPT_MAX_RETRIES"],
+        ) as ws:
             container_id = ws._container_id
             res.versions = sh(ws, spec.version_cmd).strip()
             stage(ws)
