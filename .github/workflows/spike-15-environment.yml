@@ -2,7 +2,8 @@ name: spike-15-environment
 
 # Runs the Environment spike (issue #15) on a GitHub-hosted runner: a full,
 # throwaway Ubuntu VM with sudo and KVM, so sysbox can be installed and the
-# emulator gets hardware acceleration. Posts the results on issue #15.
+# emulator gets hardware acceleration. Posts the results on issue #15,
+# including every step's outcome and the tail of any failing step's output.
 on:
   push:
     branches: [spike/15-environment]
@@ -29,68 +30,99 @@ jobs:
     timeout-minutes: 240
     defaults:
       run:
+        shell: bash
         working-directory: wayfinder/spikes/15-environment
     steps:
       - uses: actions/checkout@v4
 
       - name: Free disk (the sandbox image is ~10 GB)
+        id: disk
         working-directory: /
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          docker system prune -af >/dev/null || true
-          df -h / | tail -1
+          LOGS="$RUNNER_TEMP/spike-logs"; echo "LOGS=$LOGS" >> "$GITHUB_ENV"; mkdir -p "$LOGS"
+          {
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+            docker system prune -af >/dev/null || true
+            df -h / | tail -1
+          } 2>&1 | tee "$LOGS/disk.log"
 
       - name: Host facts
+        id: host
         run: |
-          nproc; free -g | head -2; uname -r
-          grep -m1 -oE 'vmx|svm' /proc/cpuinfo || echo "no virt flags"
-          ls -l /dev/kvm || true
+          {
+            nproc; free -g | head -2; uname -a
+            grep -m1 -oE 'vmx|svm' /proc/cpuinfo || echo "no virt flags"
+            ls -l /dev/kvm || true
+            docker version --format 'docker {{.Server.Version}}'
+            docker info --format 'cgroup {{.CgroupVersion}} driver {{.Driver}} runtimes {{json .Runtimes}}'
+          } 2>&1 | tee "$LOGS/host.log"
 
       - name: Make /dev/kvm world read-write (sysbox maps devices to nobody:nogroup)
+        id: kvm
         run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm-spike.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          ls -l /dev/kvm
+          {
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm-spike.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+            ls -l /dev/kvm
+          } 2>&1 | tee "$LOGS/kvm.log"
 
       - name: Install sysbox
+        id: sysbox
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download -R nestybox/sysbox --pattern '*linux_amd64.deb' -D /tmp/sysbox
-          sudo apt-get update -qq
-          sudo apt-get install -y jq /tmp/sysbox/*.deb
-          docker info --format '{{json .Runtimes}}'
-          sysbox-runc --version
+          {
+            gh release view -R nestybox/sysbox --json tagName,assets --jq '.tagName, (.assets[].name)'
+            gh release download -R nestybox/sysbox --pattern '*linux_amd64.deb' -D /tmp/sysbox
+            ls -l /tmp/sysbox
+            sudo apt-get update -qq
+            if ! sudo apt-get install -y jq /tmp/sysbox/*.deb; then
+              echo "::group::diagnostics"; dpkg-deb -I /tmp/sysbox/*.deb | grep -iE 'depends|conflicts'; apt-cache policy fuse fuse3; echo "::endgroup::"
+              exit 1
+            fi
+            systemctl status sysbox --no-pager | head -n 15 || true
+            docker info --format '{{json .Runtimes}}'
+            sysbox-runc --version
+          } 2>&1 | tee "$LOGS/sysbox.log"
 
       - name: Build sandbox image
+        id: image
         run: |
-          docker pull -q ghcr.io/openhands/agent-server:latest-python
-          RUNTIME_USER=$(docker inspect --format '{{.Config.User}}' ghcr.io/openhands/agent-server:latest-python)
-          echo "agent-server runs as: ${RUNTIME_USER:-root}"
-          docker build -q --build-arg RUNTIME_USER=${RUNTIME_USER:-root} -t weave-spike-environment .
+          {
+            docker pull -q ghcr.io/openhands/agent-server:latest-python
+            RUNTIME_USER=$(docker inspect --format '{{.Config.User}}' ghcr.io/openhands/agent-server:latest-python)
+            echo "agent-server runs as: ${RUNTIME_USER:-root}"
+            docker build --progress=plain --build-arg RUNTIME_USER=${RUNTIME_USER:-root} -t weave-spike-environment .
+            docker image ls weave-spike-environment
+          } 2>&1 | tee "$LOGS/image.log"
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install OpenHands SDK
-        run: pip install -q openhands-sdk==1.51.0 openhands-workspace==1.51.0
+        id: sdk
+        run: pip install -q openhands-sdk==1.51.0 openhands-workspace==1.51.0 2>&1 | tee "$LOGS/sdk.log"
 
       - name: Run spike (sample app)
+        id: spike
         continue-on-error: true
-        run: python spike.py
+        run: python spike.py 2>&1 | tee "$LOGS/spike.log"
 
       - name: Run spike (real app)
+        id: realapp
         if: ${{ inputs.rn_app_repo != '' && inputs.rn_app_repo != null }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mv results-sysbox-runc.json results-sample.json; mv proof-sysbox-runc.png proof-sample.png || true
-          gh repo clone "${{ inputs.rn_app_repo }}" /tmp/rn-app -- --depth 1
-          python spike.py --rn-app /tmp/rn-app
-          mv results-sysbox-runc.json results-real-app.json; mv proof-sysbox-runc.png proof-real-app.png || true
+          {
+            mv results-sysbox-runc.json results-sample.json; mv proof-sysbox-runc.png proof-sample.png || true
+            gh repo clone "${{ inputs.rn_app_repo }}" /tmp/rn-app -- --depth 1
+            python spike.py --rn-app /tmp/rn-app
+            mv results-sysbox-runc.json results-real-app.json; mv proof-sysbox-runc.png proof-real-app.png || true
+          } 2>&1 | tee "$LOGS/realapp.log"
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -99,17 +131,35 @@ jobs:
           path: |
             wayfinder/spikes/15-environment/results-*.json
             wayfinder/spikes/15-environment/proof-*.png
+            ${{ runner.temp }}/spike-logs/*.log
 
       - name: Post results on the ticket
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          STEPS: ${{ toJSON(steps) }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           {
             echo "## Spike run on a GitHub-hosted runner"
             echo
-            echo "Run: $RUN_URL (screenshot and full results in the \`spike-15-results\` artifact). Commit \`${GITHUB_SHA::7}\`."
+            echo "Run: $RUN_URL (screenshot, results and step logs in the \`spike-15-results\` artifact). Commit \`${GITHUB_SHA::7}\`."
+            echo
+            echo "**Steps:** $(echo "$STEPS" | jq -r 'to_entries | map("\(.key)=\(.value.outcome)") | join(", ")')"
+            for id in $(echo "$STEPS" | jq -r 'to_entries[] | select(.value.outcome == "failure") | .key'); do
+              echo
+              echo "### Failed step \`$id\` (last 60 lines)"
+              echo '```'
+              tail -n 60 "$LOGS/$id.log" 2>/dev/null | cut -c1-300 || echo "(no log)"
+              echo '```'
+            done
+            echo
+            echo "<details><summary>Host facts</summary>"
+            echo
+            echo '```'
+            cat "$LOGS/host.log" "$LOGS/kvm.log" 2>/dev/null | cut -c1-300
+            echo '```'
+            echo "</details>"
             for f in results-*.json; do
               [ -f "$f" ] || continue
               echo
@@ -125,6 +175,6 @@ jobs:
               echo '```'
               echo "</details>"
             done
-            ls results-*.json >/dev/null 2>&1 || echo "No results file was written; see the run log."
+            ls results-*.json >/dev/null 2>&1 || echo "No results file was written."
           } > /tmp/comment.md
           gh issue comment 15 -R "${{ github.repository }}" --body-file /tmp/comment.md
