@@ -82,13 +82,31 @@ The workflow step, after implementation, in which a separate agent run (its own 
 _Avoid:_ "code review" alone (also names the implementer's self-review and the human's review).
 
 ## Finding
-One problem the Agent review reports on a Task's change. Either **blocking** (a bug, an unmet Acceptance criterion, a broken test, an Acceptance criterion with no test, a test that is off-Seam, untraced to an Acceptance criterion, tautological, implementation-coupled or structural, a breach of the Product's coding standards, a security issue) or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer.
+One problem the Agent review reports on a Task's change, with an id unique within its Review round (e.g. `R2-F3`). Either **blocking** or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer. A blocking Finding has a **Severity** fixed by its category:
+- **High:** a bug, an unmet Acceptance criterion, an Acceptance criterion with no test, a broken test, a security issue.
+- **Low:** a breach of the Product's coding standards; a test that is off-Seam, untraced to an Acceptance criterion, tautological, implementation-coupled or structural.
+
+## Repeat
+A Finding the Agent review reports again after an earlier round's Finding was answered (fixed or declined), naming the Finding it repeats (`R3-F1 repeats R2-F3`). A Finding and its Repeats form one chain; the chain's length is how many times the problem has been reported.
+_Avoid:_ "same Finding" without naming which one.
+
+## Review result
+The comment the Dispatcher posts on the Story at the end of each Review round, carrying that round's Findings and the ruling on every Acceptance criterion. The only place Findings are kept; any copy on a PR is a mirror for humans and never read back.
+
+## Fix reply
+The comment the Dispatcher posts on the Story at the end of a fix run, answering every blocking Finding of the last Review result by id: fixed (with its commit) or declined (with a reason). A decline is judged by the next Agent review, which either drops the Finding or reports it as a Repeat.
+
+## Workflow comment
+A Review result, Fix reply, or other comment the Dispatcher posts that the workflow reads back. Recognised only by a signed marker in its body, never by its author, since the Dispatcher posts with a human's credentials. A comment with no valid signature is human discussion and never affects the workflow; a marked comment whose signature fails is flagged, never guessed.
 
 ## Review passed
 A Story's PRs have no blocking Findings and their Checks are green.
 
 ## Review round
-One pass of a Story's review → fix loop: a fix run, then Checks, then Agent review. Counted on the Tracker from the Story's comments since the loop last started; the loop starts afresh only on a failing Proof, a human rejection at review, or a human moving the Story out of needs-human.
+One pass of a Story's review → fix loop: a fix run, then Checks, then Agent review. Counted on the Tracker from the Story's Workflow comments since the loop last started; the loop starts afresh only on a failing Proof, a human rejection at review, or a human moving the Story out of needs-human.
+
+## Repeat limit
+The rule that ends a review → fix loop that is stuck rather than making progress, sending the Story to needs-human. If a round's Repeats are all Low, the Story stops at once. If any Repeat is High, the loop goes on until some chain reaches the Product's configured length (default 3). A loop that only ever reports new Findings goes on until the Product's round backstop.
 
 ## State
 A named, unambiguous stage of a Story or Task in the workflow graph (e.g. ready-for-agent, ready-for-human-review). Replaces the overloaded word "done".
@@ -109,7 +127,7 @@ A link saying a Story cannot go to staging until other work is merged. The other
 A State where the workflow waits for a human (grilling, triage, human review, merge). A Gate exists only as a State on the Tracker; nothing else holds a Story or Task's place while it waits.
 
 ## Dispatcher
-The service that moves Stories and Tasks from one State to the next. It reads State from the Tracker and writes State back to it, but never holds State itself; what it keeps of its own is **Run bookkeeping**.
+The deterministic service that moves Stories and Tasks from one State to the next; one per Product. It starts agent runs and Checks and collects their outcomes, but never judges code itself and never waits on a run. It reads State from the Tracker and writes State back to it, but never holds State itself; what it keeps of its own is **Run bookkeeping**.
 
 ## Agent profile
 A named pairing of an agent (e.g. Cursor, Claude Code, or a model-agnostic loop) and a model, used for an agent run. A Product sets a default Agent profile per workflow node; a Task may override it.
