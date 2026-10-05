@@ -45,6 +45,10 @@ A sub-task of a Story, and one ticket of the Story's spec. Touches **exactly one
 The single change request a Story produces in one Repo, opened from that Repo's **Integration branch** and covering every Task of the Story in that Repo. The unit of human review and merge. GitLab calls it a merge request (MR); the two words are interchangeable.
 _Avoid:_ "the Task's PR" (a PR may carry several Tasks).
 
+## Seam
+A public boundary of a Repo's code where a Task's tests observe behaviour (an API endpoint, a module's public function, a CLI command). Agreed in the Grilling session and listed on each Task; an agent writes tests only at its Task's Seams and never adds one itself.
+_Avoid:_ "test point", "unit" (both invite testing internals).
+
 ## Integration branch
 The one branch per Story per Repo into which every Task of that Story in that Repo is merged as it is built. A PR is opened from it.
 
