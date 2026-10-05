@@ -74,15 +74,15 @@ _Avoid:_ "staging" (the shared deploy target after merge), "sandbox" alone (the 
 The branch of a Repo that an Environment uses when the Story has no Task in that Repo (e.g. `dev`). Configured per Repo.
 
 ## Checks
-The test suite, lint, typecheck and build of a Repo, run by the Dispatcher itself against an agent's work, never taken on an agent's word.
+The test suite, lint, typecheck and build of a Repo, run by the Dispatcher itself against an agent's work, never taken on an agent's word. Also runs the tests a PR adds against the Base branch, where each must fail (tests for a pure refactor excepted); one that passes there tests nothing.
 _Avoid:_ "CI" (the Code host's own pipeline, which may run different things).
 
 ## Agent review
-The workflow step, after implementation, in which a separate agent run (its own Agent profile, preferably a different model from the implementer's) reviews all of a Story's PRs and reports Findings. Distinct from any review an implement run does of its own work before it finishes, which is part of implementing and never decides a State.
+The workflow step, after implementation, in which a separate agent run (its own Agent profile, preferably a different model from the implementer's) reviews all of a Story's PRs, reports every Acceptance criterion of every Task as met or unmet, and reports Findings. A review that leaves any Acceptance criterion out is a failed run, never a pass. It judges only tests the PRs add or change. Distinct from any review an implement run does of its own work before it finishes, which is part of implementing and never decides a State.
 _Avoid:_ "code review" alone (also names the implementer's self-review and the human's review).
 
 ## Finding
-One problem the Agent review reports on a Task's change. Either **blocking** (a bug, an unmet Acceptance criterion, a broken test, a test that is off-Seam, untraced to an Acceptance criterion, tautological, implementation-coupled or structural, a breach of the Product's coding standards, a security issue) or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer.
+One problem the Agent review reports on a Task's change. Either **blocking** (a bug, an unmet Acceptance criterion, a broken test, an Acceptance criterion with no test, a test that is off-Seam, untraced to an Acceptance criterion, tautological, implementation-coupled or structural, a breach of the Product's coding standards, a security issue) or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer.
 
 ## Review passed
 A Story's PRs have no blocking Findings and their Checks are green.
