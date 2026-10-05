@@ -1,0 +1,134 @@
+name: spike-13-subscription-agents
+
+# Runs the subscription-agent spike (issue #13) on a GitHub-hosted runner:
+# Claude Code and Cursor through OpenHands ACPAgent in a DockerWorkspace, using
+# only credentials from repository secrets. Posts results on issue #13.
+#
+# Secrets (Settings -> Secrets and variables -> Actions -> New repository secret):
+#   CLAUDE_CODE_OAUTH_TOKEN  from `claude setup-token`
+#   CURSOR_API_KEY           from the Cursor dashboard (Integrations -> API keys)
+# Each agent runs only if its secret is set.
+on:
+  push:
+    branches: [spike/13-subscription-agents]
+    paths:
+      - "wayfinder/spikes/13-subscription-agents/**"
+      - ".github/workflows/spike-13-subscription-agents.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: spike-13
+  cancel-in-progress: true
+
+jobs:
+  agents:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: wayfinder/spikes/13-subscription-agents
+    env:
+      HAS_CLAUDE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+      HAS_CURSOR: ${{ secrets.CURSOR_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Which credentials are set
+        id: guard
+        run: |
+          echo "claude-code: $HAS_CLAUDE   cursor: $HAS_CURSOR"
+          if [ "$HAS_CLAUDE" != true ] && [ "$HAS_CURSOR" != true ]; then
+            echo "::notice::Neither CLAUDE_CODE_OAUTH_TOKEN nor CURSOR_API_KEY is set as a repository secret; nothing to run."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build sandbox image (agent-server + Cursor CLI)
+        if: steps.guard.outputs.go == 'true'
+        run: |
+          docker pull -q ghcr.io/openhands/agent-server:latest-python
+          RUNTIME_USER=$(docker inspect --format '{{.Config.User}}' ghcr.io/openhands/agent-server:latest-python)
+          echo "agent-server runs as: ${RUNTIME_USER:-root}"
+          docker build --build-arg RUNTIME_USER=${RUNTIME_USER:-root} -t weave-spike-agent-server . 2>&1 | tail -n 40
+
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.go == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Install OpenHands SDK
+        if: steps.guard.outputs.go == 'true'
+        run: pip install -q openhands-sdk==1.51.0 openhands-workspace==1.51.0 openhands-tools==1.51.0
+
+      - name: Run Claude Code
+        if: steps.guard.outputs.go == 'true' && env.HAS_CLAUDE == 'true'
+        continue-on-error: true
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL   # they silently override the OAuth token
+          python spike.py --agent claude-code
+
+      - name: Run Cursor
+        if: steps.guard.outputs.go == 'true' && env.HAS_CURSOR == 'true'
+        continue-on-error: true
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+        run: python spike.py --agent cursor
+
+      # The issue comment is public and log masking does not apply to it, so
+      # strip the credential values from the results before anything leaves.
+      - name: Scrub credentials from results
+        if: steps.guard.outputs.go == 'true' && always()
+        env:
+          T1: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          T2: ${{ secrets.CURSOR_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os, re, pathlib
+          vals = [v for v in (os.environ.get("T1"), os.environ.get("T2")) if v and len(v) > 8]
+          for p in pathlib.Path(".").glob("results-*.json"):
+              s = p.read_text()
+              for v in vals:
+                  s = s.replace(v, "***")
+              s = re.sub(r"sk-ant-[A-Za-z0-9_\-]{10,}", "sk-ant-***", s)
+              p.write_text(s)
+              assert not any(v in p.read_text() for v in vals)
+              print("scrubbed", p)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: steps.guard.outputs.go == 'true' && always()
+        with:
+          name: spike-13-results
+          path: wayfinder/spikes/13-subscription-agents/results-*.json
+
+      - name: Post results on the ticket
+        if: steps.guard.outputs.go == 'true' && always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          {
+            echo "## Spike run on a GitHub-hosted runner"
+            echo
+            echo "Run: $RUN_URL (full results in the \`spike-13-results\` artifact). Commit \`${GITHUB_SHA::7}\`. Agents run: claude-code=$HAS_CLAUDE, cursor=$HAS_CURSOR."
+            for f in results-*.json; do
+              [ -f "$f" ] || continue
+              echo
+              echo "<details><summary><code>$f</code></summary>"
+              echo
+              echo '```json'
+              head -c 60000 "$f"
+              echo
+              echo '```'
+              echo "</details>"
+            done
+            ls results-*.json >/dev/null 2>&1 || echo "No results file was written; see the run log."
+          } > /tmp/comment.md
+          gh issue comment 13 -R "${{ github.repository }}" --body-file /tmp/comment.md
