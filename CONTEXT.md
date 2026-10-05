@@ -86,6 +86,10 @@ One problem the Agent review reports on a Task's change, with an id unique withi
 - **High:** a bug, an unmet Acceptance criterion, an Acceptance criterion with no test, a broken test, a security issue.
 - **Low:** a breach of the Product's coding standards; a test that is off-Seam, untraced to an Acceptance criterion, tautological, implementation-coupled or structural.
 
+## Human Finding
+A blocking Finding a human writes as a comment on the Story starting with the `/weave finding` command, numbered within its round (e.g. `R2-H1`) and always High. It may only name a bug or an unmet existing Acceptance criterion; new scope goes through grilling as a new Task or a Follow-up Story. Posted while a run is live, it waits for the next fix run; posted while the Story waits for Proofs or human review, it counts as a rejection. The fix run must answer it; a declined Human Finding sends the Story to needs-human at once, never to the Agent review.
+_Avoid:_ "instruction", "feedback comment" (both suggest any comment steers the loop).
+
 ## Repeat
 A Finding the Agent review reports again after an earlier round's Finding was answered (fixed or declined), naming the Finding it repeats (`R3-F1 repeats R2-F3`). A Finding and its Repeats form one chain; the chain's length is how many times the problem has been reported.
 _Avoid:_ "same Finding" without naming which one.
@@ -97,7 +101,7 @@ The comment the Dispatcher posts on the Story at the end of each Review round, c
 The comment the Dispatcher posts on the Story at the end of a fix run, answering every blocking Finding of the last Review result by id: fixed (with its commit) or declined (with a reason). A decline is judged by the next Agent review, which either drops the Finding or reports it as a Repeat.
 
 ## Workflow comment
-A Review result, Fix reply, or other comment the Dispatcher posts that the workflow reads back. Recognised only by a signed marker in its body, never by its author, since the Dispatcher posts with a human's credentials. A comment with no valid signature is human discussion and never affects the workflow; a marked comment whose signature fails is flagged, never guessed.
+A Review result, Fix reply, or other comment the Dispatcher posts that the workflow reads back. Recognised only by a signed marker in its body, never by its author, since the Dispatcher posts with a human's credentials. The signature covers the whole body, the Story and the round, so an edited or copied Workflow comment fails it; a marker inside a quote is ignored. A comment with no valid signature is human discussion and never affects the workflow, unless it is a Human Finding; a marked comment whose signature fails is flagged, never guessed.
 
 ## Review passed
 A Story's PRs have no blocking Findings and their Checks are green.
