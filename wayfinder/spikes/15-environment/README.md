@@ -54,7 +54,6 @@ If you don't have such a machine, a GCP VM works: an Intel N2 instance created w
    RUNTIME_USER=$(docker inspect --format '{{.Config.User}}' ghcr.io/openhands/agent-server:latest-python)
    docker build --build-arg RUNTIME_USER=${RUNTIME_USER:-root} -t weave-spike-environment .
    ```
-   If the command-line tools download 404s, take the current Linux zip name from <https://developer.android.com/studio#command-line-tools-only> and update the Dockerfile.
 4. **Install the SDK and run:**
    ```bash
    python3 -m venv .venv && . .venv/bin/activate

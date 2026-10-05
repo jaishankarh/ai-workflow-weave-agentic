@@ -43,12 +43,22 @@ ENV ANDROID_HOME=/opt/android-sdk
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
 ENV PATH=/opt/jdk17/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/emulator:${PATH}
 ARG SYSTEM_IMAGE="system-images;android-34;google_apis;x86_64"
-RUN mkdir -p ${ANDROID_HOME}/cmdline-tools \
- && curl -fsSL -o /tmp/clt.zip https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip \
- && unzip -q /tmp/clt.zip -d /tmp/clt && mv /tmp/clt/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && rm -rf /tmp/clt /tmp/clt.zip \
- && yes | sdkmanager --licenses >/dev/null \
- && sdkmanager --install "platform-tools" "emulator" "platforms;android-35" "build-tools;35.0.0" "${SYSTEM_IMAGE}" >/dev/null \
- && chmod -R a+rwX ${ANDROID_HOME}
+# Command-line tools: take the newest zip name from Google's repository index
+# rather than hard-coding a build number that goes stale.
+RUN set -eux; \
+    zip=$(curl -fsSL https://dl.google.com/android/repository/repository2-3.xml \
+          | grep -oE 'commandlinetools-linux-[0-9]+_latest\.zip' | sort -t- -k3 -n | tail -1); \
+    echo "command-line tools: ${zip}"; test -n "${zip}"; \
+    mkdir -p ${ANDROID_HOME}/cmdline-tools; \
+    curl -fsSL -o /tmp/clt.zip "https://dl.google.com/android/repository/${zip}"; \
+    unzip -q /tmp/clt.zip -d /tmp/clt; \
+    mv /tmp/clt/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest; \
+    rm -rf /tmp/clt /tmp/clt.zip; \
+    java -version; sdkmanager --version
+RUN (yes || true) | sdkmanager --licenses > /tmp/licenses.log || (tail -n 20 /tmp/licenses.log; exit 1)
+RUN sdkmanager --install "platform-tools" "emulator" "platforms;android-35" "build-tools;35.0.0" "${SYSTEM_IMAGE}" > /tmp/sdk.log 2>&1 \
+      || (tail -n 40 /tmp/sdk.log; exit 1); \
+    chmod -R a+rwX ${ANDROID_HOME}; ls ${ANDROID_HOME}
 ENV SPIKE_SYSTEM_IMAGE=${SYSTEM_IMAGE}
 
 # Scripts the spike runs inside the sandbox
