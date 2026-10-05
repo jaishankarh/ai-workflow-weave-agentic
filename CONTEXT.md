@@ -82,7 +82,7 @@ The workflow step, after implementation, in which a separate agent run (its own 
 _Avoid:_ "code review" alone (also names the implementer's self-review and the human's review).
 
 ## Finding
-One problem the Agent review reports on a Task's change. Either **blocking** (a bug, an unmet Acceptance criterion, a broken test, a breach of the Product's coding standards, a security issue) or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer.
+One problem the Agent review reports on a Task's change. Either **blocking** (a bug, an unmet Acceptance criterion, a broken test, a test that is off-Seam, untraced to an Acceptance criterion, tautological, implementation-coupled or structural, a breach of the Product's coding standards, a security issue) or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer.
 
 ## Review passed
 A Story's PRs have no blocking Findings and their Checks are green.
