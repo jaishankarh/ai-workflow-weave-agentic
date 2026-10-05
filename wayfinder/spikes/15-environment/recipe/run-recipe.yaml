@@ -1,0 +1,12 @@
+# Sample Run recipe, for this spike only. The real Run recipe format is not
+# decided yet; this file only says what the spike brings up, in roughly the
+# shape a recipe would need (build, services, seed, ready check).
+name: spike-backend
+compose: compose.yaml          # two services: api (built here) + redis
+seed:
+  # {{GREETING}} is a per-run nonce, so a screenshot showing it can only have
+  # come from this Environment's backend.
+  - docker compose exec -T redis redis-cli SET greeting "{{GREETING}}"
+ready:
+  url: http://localhost:8080/health
+  timeout_seconds: 180

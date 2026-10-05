@@ -1,0 +1,16 @@
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+  api:
+    build: ./api
+    environment:
+      REDIS_HOST: redis
+    ports:
+      - "8080:8080"   # published on the sandbox's loopback; the emulator reaches it as 10.0.2.2:8080
+    depends_on:
+      redis:
+        condition: service_healthy
