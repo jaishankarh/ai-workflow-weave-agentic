@@ -251,16 +251,34 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         results["traceback"] = traceback.format_exc()[-4000:]
 
     # ------------------------------------------------------------ teardown check
-    time.sleep(5)
+    # The workspace's cleanup runs `docker stop` on a `--rm` container, and the
+    # removal that follows is asynchronous (a sysbox container with inner Docker
+    # data can take a while). Poll for removal instead of assuming it, and record
+    # how long it took: the Dispatcher's wrapper needs the same wait.
+    t_exit = time.monotonic()
+    state_while_waiting = ""
+    while container_id and time.monotonic() - t_exit < 180:
+        if container_id not in host_inventory()["containers"]:
+            break
+        state_while_waiting = sh(f"docker inspect -f '{{{{.State.Status}}}}' {container_id}")
+        time.sleep(2)
+    removal_seconds = round(time.monotonic() - t_exit, 1)
     after = host_inventory()
     leftovers = {k: sorted(after[k] - before[k]) for k in before}
     sandbox_image_id = sh(f"docker image inspect -f '{{{{.Id}}}}' {args.image}")
     leftovers["images"] = [i for i in leftovers["images"] if i != sandbox_image_id]
+    gone = container_id is None or container_id not in after["containers"]
     results["checks"]["teardown"] = {
         "ok": not any(leftovers.values()),
-        "sandbox_container_gone": container_id is None or container_id not in after["containers"],
+        "sandbox_container_gone": gone,
+        "seconds_until_sandbox_removed": removal_seconds if gone else None,
+        "sandbox_state_while_waiting": state_while_waiting,
         "new_on_host": leftovers,
     }
+    if not gone:  # record what it was stuck in, then clean the runner up
+        results["checks"]["teardown"]["stuck_inspect"] = sh(
+            f"docker inspect -f '{{{{json .State}}}}' {container_id}")[:2000]
+        sh(f"docker rm -f {container_id}")
     results["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     return results
 
