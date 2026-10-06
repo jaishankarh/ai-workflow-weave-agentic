@@ -1,7 +1,10 @@
 # One Product's configuration (read by workflow_weave.agent_worker.load_product_config).
-# Later tickets add per-Repo skill_overrides, coding_standards and rules_files,
+# Later tickets add per-Repo coding_standards and rules_files,
 # and the Product's Subscription associations.
 product: ahdismoi
 repos:
   ahdismoi:
     source: /srv/repos/ahdismoi   # where the sandbox clones the Repo from
+    # Central skills for which this Repo's own .claude/skills/<name> is used instead.
+    # Never a protected skill (the fix skill, the review skill, the test rules).
+    skill_overrides: []

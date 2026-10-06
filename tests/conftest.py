@@ -3,7 +3,8 @@
 Images are built once per session. Environment knobs (see README):
   WEAVE_TEST_BASE_IMAGE      base image for the sandbox image (default ubuntu:24.04)
   WEAVE_TEST_BUILD_NETWORK   value for `docker build --network` (e.g. host)
-  WEAVE_TEST_SKIP_BUILD=1    use already built weave/sandbox:test and weave/probe-agent:test
+  WEAVE_TEST_SKIP_BUILD=1    use already built weave/sandbox:<tag> and weave/probe-agent:<tag>
+  WEAVE_TEST_IMAGE_TAG       the <tag> above (default test); give each worktree its own
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from typing import Callable
 
 import pytest
 
+from workflow_weave import central_skills
 from workflow_weave.agent_worker import (
     AgentProfile,
     AgentWorker,
@@ -31,8 +33,9 @@ os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 ROOT = Path(__file__).resolve().parent.parent
-SANDBOX_IMAGE = "weave/sandbox:test"
-PROBE_IMAGE = "weave/probe-agent:test"
+_TAG = os.environ.get("WEAVE_TEST_IMAGE_TAG", "test")
+SANDBOX_IMAGE = f"weave/sandbox:{_TAG}"
+PROBE_IMAGE = f"weave/probe-agent:{_TAG}"
 PRODUCT = "probe-product"
 
 
@@ -98,19 +101,25 @@ def runs_dir(tmp_path: Path) -> Path:
     return tmp_path / "runs"
 
 
+# This repo's own Central skills (the real upstream copy), found through weave.yaml.
+REPO_CENTRAL_SKILLS = central_skills.load(ROOT / "weave.yaml").location
+
+
 @pytest.fixture
 def make_worker(
     tmp_path: Path, runs_dir: Path, onboarded_repo: Path, probe_profile: AgentProfile
-) -> Callable[[], AgentWorker]:
-    product_file = tmp_path / "product.yaml"
-    product_file.write_text(f"product: {PRODUCT}\nrepos:\n  app:\n    source: {onboarded_repo}\n")
+) -> Callable[..., AgentWorker]:
+    default_product = f"product: {PRODUCT}\nrepos:\n  app:\n    source: {onboarded_repo}\n"
 
-    def make() -> AgentWorker:
+    def make(*, product_yaml: str = default_product, central_skills_location: Path = REPO_CENTRAL_SKILLS) -> AgentWorker:
+        product_file = tmp_path / "product.yaml"
+        product_file.write_text(product_yaml)
         settings = WorkerSettings(
             runs_dir=runs_dir,
             products={PRODUCT: load_product_config(product_file)},
             agent_profiles={"probe": probe_profile},
             sandbox_nofile_limit=_nofile_limit(),
+            central_skills_location=central_skills_location,
         )
         return AgentWorker(settings)
 
@@ -124,13 +133,15 @@ def worker(make_worker: Callable[[], AgentWorker]):
     w.shutdown()
 
 
-def probe_request(script: dict, *, branch: str = "story-1") -> RunRequest:
+def probe_request(
+    script: dict, *, branch: str = "story-1", skill: str = "implement-spec", repos: list[str] = ("app",)
+) -> RunRequest:
     """A run request whose spec tells the probe how to behave."""
     return RunRequest(
         product=PRODUCT,
         agent_profile="probe",
-        repos=[RepoTarget(name="app", integration_branch=branch, base_branch="main")],
-        skill="implement-spec",
+        repos=[RepoTarget(name=r, integration_branch=branch, base_branch="main") for r in repos],
+        skill=skill,
         inputs=RunInputs(spec=f"A spec for the probe.\nprobe: {json.dumps(script)}\n", tasks=["Task one"]),
     )
 

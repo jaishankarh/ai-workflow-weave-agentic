@@ -16,7 +16,10 @@ from openhands.sdk.conversation.response_utils import get_agent_final_response
 
 from .config import WorkerSettings
 from .model import Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
-from .sandbox import Sandbox
+from .sandbox import Sandbox, stage_skills
+from .staging import StagingError, StagingPlan, central_skills_version, read_repo_skills
+from .staging import plan as plan_skills
+from workflow_weave.central_skills import CentralSkills
 
 TERMINAL = {"finished", "error", "stuck"}
 # The agent is asked to end its last reply with one of these lines.
@@ -137,6 +140,7 @@ class AgentWorker:
         conversation = None
         final: tuple[RunState, Outcome | None, str | None]
         try:
+            staging = self._plan_skills(run, product)
             sandbox = Sandbox(
                 image=profile.image,
                 run_id=rec.run_id,
@@ -149,6 +153,7 @@ class AgentWorker:
                 sandbox.put_repo(
                     product.repos[target.name].source, target.name, target.base_branch, target.integration_branch
                 )
+            stage_skills(sandbox, staging)
             if run.cancel_requested.is_set():
                 raise _Cancelled
 
@@ -207,6 +212,26 @@ class AgentWorker:
                 pass
             sandbox.destroy()
         return leftovers
+
+    def _plan_skills(self, run: _Run, product: Any) -> StagingPlan:
+        """Decide the run's skills, and record the Central skills version and every clash."""
+        if self.settings.central_skills_location is None:
+            raise StagingError("no Central skills location is configured")
+        central = CentralSkills(Path(self.settings.central_skills_location))
+        repos = [
+            read_repo_skills(t.name, product.repos[t.name].source, t.base_branch, product.repos[t.name].skill_overrides)
+            for t in run.request.repos
+        ]
+        plan = plan_skills(central, run.request.skill, repos)
+        rec = run.record
+        rec.central_skills = central_skills_version(central)
+        rec.skills_staged = sorted(plan.staged)
+        rec.skill_overrides_applied = plan.overridden
+        rec.skill_clashes = plan.notes
+        for line in plan.notes:
+            self._note(rec, line)
+        self._save(rec)
+        return plan
 
     # ------------------------------------------------------------------ records
 

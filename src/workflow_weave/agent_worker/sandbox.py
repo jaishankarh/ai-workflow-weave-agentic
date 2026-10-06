@@ -126,3 +126,17 @@ class Sandbox:
 
     def destroy(self) -> None:
         _docker("rm", "-f", self.container_id, timeout=60)
+
+
+# For Claude Code (and the probe), the agent's user-level skills folder.
+USER_SKILLS_DIR = "$HOME/.claude/skills"
+
+
+def stage_skills(sandbox: Sandbox, plan) -> None:
+    """Unpack the planned skills into the user-level skills folder; never into a working copy."""
+    with tempfile.TemporaryDirectory() as tmp:
+        archive = Path(tmp) / "skills.tar"
+        archive.write_bytes(plan.tarball())
+        remote = "/tmp/weave-staging/skills.tar"
+        sandbox.workspace.file_upload(archive, remote)
+    sandbox.sh(f'mkdir -p "{USER_SKILLS_DIR}" && tar -xf {remote} -C "{USER_SKILLS_DIR}" && rm -f {remote}', cwd="/")

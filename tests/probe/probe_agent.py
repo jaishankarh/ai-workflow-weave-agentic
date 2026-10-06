@@ -23,6 +23,7 @@ Add a new report item by adding a function to ``REPORTERS``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -78,11 +79,70 @@ def report_cwd(ctx: dict[str, Any]) -> Any:
     return ctx.get("cwd")
 
 
+USER_SKILLS = Path.home() / ".claude" / "skills"
+PROJECT_SKILLS = Path(".claude") / "skills"
+
+
+def _skill_description(skill_md: Path) -> str | None:
+    m = re.search(r"^description:\s*(.*)$", skill_md.read_text(), re.MULTILINE)
+    return m.group(1).strip().strip('"') if m else None
+
+
+def _skills_in(folder: Path) -> dict[str, str | None]:
+    if not folder.is_dir():
+        return {}
+    return {d.name: _skill_description(d / "SKILL.md")
+            for d in sorted(folder.iterdir()) if (d / "SKILL.md").is_file()}
+
+
+def report_user_skills(ctx: dict[str, Any]) -> Any:
+    """Skills staged at the agent's user level: name -> description."""
+    return _skills_in(USER_SKILLS)
+
+
+def report_skills_loaded(ctx: dict[str, Any]) -> Any:
+    """The skill the agent loads for each name, by Claude Code's rule: a user-level
+    skill wins over a project (Repo) skill of the same name."""
+    loaded: dict[str, dict] = {}
+    if WORKSPACE.is_dir():
+        for repo in sorted(WORKSPACE.iterdir()):
+            for name, desc in _skills_in(repo / PROJECT_SKILLS).items():
+                loaded.setdefault(name, {"level": "project", "repo": repo.name, "description": desc})
+    for name, desc in _skills_in(USER_SKILLS).items():
+        loaded[name] = {"level": "user", "description": desc}
+    return loaded
+
+
+def report_working_copies(ctx: dict[str, Any]) -> Any:
+    """Each working copy's full `git status` (ignored and untracked files too) and a
+    digest of every file outside `.git`, to compare with the Repo as committed."""
+    out = {}
+    if WORKSPACE.is_dir():
+        for d in sorted(WORKSPACE.iterdir()):
+            if (d / ".git").exists():
+                out[d.name] = {
+                    "status": _git(d, "status", "--porcelain", "--ignored", "--untracked-files=all"),
+                    "digest": tree_digest(d),
+                }
+    return out
+
+
+def tree_digest(root: Path) -> str:
+    """sha256 over every file's relative path and bytes, `.git` excluded."""
+    h = hashlib.sha256()
+    for f in sorted(p for p in root.rglob("*") if p.is_file() and ".git" not in p.relative_to(root).parts):
+        h.update(str(f.relative_to(root)).encode() + b"\0" + f.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
 REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "earlier_run_markers": report_earlier_run,
     "env_names": report_env_names,
     "repos": report_repos,
     "cwd": report_cwd,
+    "user_skills": report_user_skills,
+    "skills_loaded": report_skills_loaded,
+    "working_copies": report_working_copies,
 }
 
 
