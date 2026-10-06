@@ -145,6 +145,10 @@ _Avoid:_ "Run dashboard" (the earlier read-only page it replaces), "console" (su
 A named pairing of an agent (e.g. Cursor, Claude Code, or a model-agnostic loop) and a model, used for an agent run. A Product sets a default Agent profile per workflow node; a Task may override it.
 _Avoid:_ "agent" alone when the model matters too.
 
+## Subscription
+One stored account credential for one agent provider (a Claude Code, Cursor or Kimi Code account, or any other agent reached the same way), created once and named. A Product is associated with one or more Subscriptions per agent, in fallback order; a run uses an Agent profile together with a Subscription from its own Product's list, and never one associated only with another Product. Each Subscription has its own cap on runs at once, shared by every Product that uses it.
+_Avoid:_ "token", "API key" alone (a Subscription is the account, whatever credential reaches it); "account" alone (also the human's Tracker login).
+
 ## Agent toolset
 The skills and MCP servers staged into one agent run. Skills come from the **Central skills** plus the Repo's own; MCP servers come from a Product-wide catalog. A database MCP server only ever connects to that run's own Environment, wired from the services its Run recipes bring up, and is enabled only when a Run recipe brings up that database; never to a shared or production database.
 _Avoid:_ "plugins", "tools" alone (both also name an agent's built-in abilities).
