@@ -208,11 +208,24 @@ def mark_done(prompt_text: str, ticket: str) -> dict[str, Any]:
     return {"action": "mark_done", "ticket": ticket, "ok": True}
 
 
+def push(branch: str) -> dict[str, Any]:
+    """Commit in the first working copy and push HEAD to `branch` on its remote."""
+    repo = next(d for d in sorted(WORKSPACE.iterdir()) if (d / ".git").exists())
+    _git(repo, "commit", "-q", "--allow-empty", "-m", f"probe commit for {branch}")
+    commit = _git(repo, "rev-parse", "HEAD")
+    r = subprocess.run(["git", "-C", str(repo), "push", "origin", f"HEAD:refs/heads/{branch}"],
+                       capture_output=True, text=True, timeout=60)
+    return {"action": "push", "branch": branch, "ok": r.returncode == 0, "commit": commit,
+            "output": (r.stderr or r.stdout)[-1500:]}
+
+
 def run_actions(script: dict[str, Any], prompt_text: str) -> list[dict[str, Any]]:
     """Do what the script asks before reporting; each action's result goes in the report."""
     results = []
     for ticket in script.get("mark_done", []):
         results.append(_attempt(lambda: mark_done(prompt_text, ticket), {"action": "mark_done", "ticket": ticket}))
+    for branch in script.get("push", []):
+        results.append(_attempt(lambda: push(branch), {"action": "push", "branch": branch}))
     return results
 
 

@@ -19,6 +19,7 @@ from .model import NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStat
 from .sandbox import Sandbox, stage_skills
 from .subscriptions import Lease
 from . import local_tickets
+from .push_gateway import GATEWAY_HOST, PushGateway, RunRemotes
 from .staging import StagingError, StagingPlan, central_skills_version, read_repo_skills
 from .staging import plan as plan_skills
 from workflow_weave.central_skills import CentralSkills
@@ -64,6 +65,8 @@ class AgentWorker:
         self._runs: dict[str, _Run] = {}
         self._lock = threading.Lock()
         settings.runs_dir.mkdir(parents=True, exist_ok=True)
+        self._own_gateway = settings.push_gateway is None
+        self.push_gateway = settings.push_gateway or PushGateway()
 
     # ------------------------------------------------------------------ contract
 
@@ -146,6 +149,8 @@ class AgentWorker:
         for run in runs:
             if not run.done.is_set():
                 self.cancel(run.record.run_id)
+        if self._own_gateway:
+            self.push_gateway.shutdown()
 
     # ------------------------------------------------------------------ the run
 
@@ -155,11 +160,16 @@ class AgentWorker:
         product = self.settings.products[run.request.product]
         sandbox: Sandbox | None = None
         conversation = None
+        remotes: RunRemotes | None = None
         final: tuple[RunState, Outcome | None, str | None]
         try:
             staging = self._plan_skills(run, product)
             originals = local_tickets.write_originals(
                 run.request.inputs, self.settings.runs_dir / rec.run_id / "tickets"
+            )
+            remotes = self.push_gateway.open_run(
+                self.settings.runs_dir / rec.run_id / "remotes",
+                {t.name: (product.repos[t.name].source, t.integration_branch) for t in run.request.repos},
             )
             sandbox = Sandbox(
                 image=profile.image,
@@ -171,11 +181,13 @@ class AgentWorker:
                 start_timeout=self.settings.sandbox_start_timeout,
                 # Read-only, so the agent cannot change the originals (ADR 0009).
                 mounts=[(str(originals.resolve()), local_tickets.ORIGINALS_DIR)],
+                extra_hosts=[f"{GATEWAY_HOST}:host-gateway"],
             )
             sandbox.sh(local_tickets.MAKE_TRACKER, cwd="/")
             for target in run.request.repos:
                 sandbox.put_repo(
-                    product.repos[target.name].source, target.name, target.base_branch, target.integration_branch
+                    product.repos[target.name].source, target.name, target.base_branch, target.integration_branch,
+                    remotes.url(target.name),
                 )
             stage_skills(sandbox, staging)
             if run.cancel_requested.is_set():
@@ -199,6 +211,8 @@ class AgentWorker:
             final = (RunState.ENDED, Outcome.INFRA_FAILURE, f"{type(e).__name__}: {e}"[:2000])
         finally:
             leftovers = self._stop(conversation, sandbox, rec)
+            if remotes is not None:
+                self.push_gateway.close_run(remotes)  # the run's push token stops working
             self.settings.subscriptions.release(run.lease)  # however the run ended
         rec.processes_left_after_close = leftovers
         if leftovers:

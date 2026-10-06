@@ -63,3 +63,19 @@ def test_tickets_the_probe_marks_done_are_listed_in_the_run_result(make_worker):
     assert record.tickets_done == ["spec", "02"]
     # It is part of the saved result, read back without the sandbox.
     assert make_worker().record(record.run_id).tickets_done == ["spec", "02"]
+
+
+def branch_tip(repo: Path, branch: str) -> str | None:
+    r = subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify", f"refs/heads/{branch}"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() or None
+
+
+def test_the_probe_can_push_to_the_runs_integration_branch(worker, onboarded_repo):
+    final, _, report = run(worker, {"end": "succeed", "push": ["story-1"]})
+
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+    [push] = [a for a in report["actions"] if a["action"] == "push"]
+    assert push["ok"], push
+    # The commit reached the Repo itself, on the Integration branch.
+    assert branch_tip(onboarded_repo, "story-1") == push["commit"]

@@ -104,8 +104,9 @@ class Sandbox:
             raise SandboxError(f"`{command}` failed ({r.exit_code}): {(r.stderr or r.stdout or '').strip()[-1000:]}")
         return r.stdout or ""
 
-    def put_repo(self, source: str, name: str, base_branch: str, integration_branch: str) -> None:
-        """Clone a Repo from the Sandbox host into the sandbox and check out its Integration branch."""
+    def put_repo(self, source: str, name: str, base_branch: str, integration_branch: str, remote_url: str) -> None:
+        """Clone a Repo from the Sandbox host into the sandbox, check out its Integration
+        branch, and make `remote_url` (the push gateway) its only remote."""
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp) / f"{name}.bundle"
             r = subprocess.run(["git", "-C", source, "bundle", "create", str(bundle), "--all"], capture_output=True, text=True)
@@ -116,6 +117,7 @@ class Sandbox:
         dest = f"{WORKDIR}/{name}"
         self.sh(f"git clone -q --branch {base_branch} {remote_bundle} {dest}")
         self.sh(f"git checkout -q -B {integration_branch}", cwd=dest)
+        self.sh(f"git remote set-url origin {remote_url} && rm -f {remote_bundle}", cwd=dest)
 
     def processes(self) -> list[str]:
         """Command lines of live processes, apart from the agent-server itself."""

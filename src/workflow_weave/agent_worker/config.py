@@ -7,6 +7,7 @@ from pathlib import Path
 
 import yaml
 
+from .push_gateway import PushGateway
 from .subscriptions import SubscriptionStore
 
 
@@ -103,3 +104,6 @@ class WorkerSettings:
     sandbox_start_timeout: float = 120.0
     # Where the Central skills live (`central_skills.location` in weave.yaml).
     central_skills_location: Path | None = None
+    # The sandboxes' only git remote (ADR 0009). None: the worker starts its own,
+    # listening on the Docker bridge gateway.
+    push_gateway: PushGateway | None = None
