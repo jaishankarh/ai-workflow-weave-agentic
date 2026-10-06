@@ -1,0 +1,7 @@
+# One Product's configuration (read by workflow_weave.agent_worker.load_product_config).
+# Later tickets add per-Repo skill_overrides, coding_standards and rules_files,
+# and the Product's Subscription associations.
+product: ahdismoi
+repos:
+  ahdismoi:
+    source: /srv/repos/ahdismoi   # where the sandbox clones the Repo from

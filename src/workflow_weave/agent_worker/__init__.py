@@ -1,0 +1,40 @@
+"""The agent worker (Seam A): start, status and cancel agent runs.
+
+    worker = AgentWorker(settings)
+    started = worker.start(RunRequest(...))   # returns at once
+    worker.status(started.run_id)            # running | cancelled | outcome + reason
+    worker.cancel(started.run_id)            # closes the conversation, removes the sandbox
+"""
+
+from .config import AgentProfile, ProductConfig, RepoConfig, WorkerSettings, load_product_config
+from .model import (
+    Outcome,
+    RepoTarget,
+    RunInputs,
+    RunRecord,
+    RunRequest,
+    RunState,
+    RunStatus,
+    Started,
+    StartResult,
+)
+from .worker import AgentWorker, UnknownRun
+
+__all__ = [
+    "AgentProfile",
+    "AgentWorker",
+    "Outcome",
+    "ProductConfig",
+    "RepoConfig",
+    "RepoTarget",
+    "RunInputs",
+    "RunRecord",
+    "RunRequest",
+    "RunState",
+    "RunStatus",
+    "Started",
+    "StartResult",
+    "UnknownRun",
+    "WorkerSettings",
+    "load_product_config",
+]
