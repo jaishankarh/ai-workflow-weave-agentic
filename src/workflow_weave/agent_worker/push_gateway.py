@@ -32,6 +32,19 @@ from pathlib import Path
 
 GATEWAY_HOST = "weave-git"
 
+# Environment variables that carry a Tracker or Code host token (gh, glab, CI). Never
+# given to a sandbox, even if a Subscription's env names one (ADR 0009).
+CODE_HOST_TOKEN_VARS = frozenset({
+    "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITHUB_PAT",
+    "GITLAB_TOKEN", "GLAB_TOKEN", "CI_JOB_TOKEN", "GITEA_TOKEN", "BITBUCKET_TOKEN",
+})
+
+
+def without_code_host_tokens(env: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+    """`env` minus any Tracker / Code host token, and the names dropped."""
+    dropped = sorted(k for k in env if k.upper() in CODE_HOST_TOKEN_VARS)
+    return {k: v for k, v in env.items() if k not in dropped}, dropped
+
 _HOOK = """#!/bin/sh
 # Accept only the run's Integration branch, and only once it is on the Repo's real remote.
 set -u

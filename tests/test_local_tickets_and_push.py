@@ -93,3 +93,31 @@ def test_pushing_to_any_other_branch_including_the_base_branch_is_refused(worker
     assert "refused" in pushes["main"]["output"]
     assert branch_tip(onboarded_repo, "main") == main_before
     assert branch_tip(onboarded_repo, "other-story") is None
+
+
+# Env names a Tracker or Code host token goes by (gh, glab, GitHub Actions, git hosts).
+TRACKER_TOKEN_NAMES = {"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+                       "GITLAB_TOKEN", "GLAB_TOKEN", "CI_JOB_TOKEN", "GITHUB_PAT"}
+
+
+def test_no_tracker_or_code_host_token_is_present_in_the_sandbox_environment(make_worker, tmp_path, monkeypatch):
+    # The Sandbox host itself holds one, and a Subscription's env tries to slip one in too.
+    monkeypatch.setenv("GH_TOKEN", "host-token")
+    store = tmp_path / "leaky-subscriptions.yaml"
+    store.write_text(
+        "subscriptions:\n  leaky:\n    agent: probe\n    cap: 2\n"
+        "    env: {PROBE_TOKEN: probe-token, GITHUB_TOKEN: slipped-in, GITLAB_TOKEN: slipped-in}\n"
+        f"products:\n  {PRODUCT}:\n    probe: [leaky]\n"
+    )
+    from workflow_weave.agent_worker import load_subscription_store
+
+    worker = make_worker(subscriptions=load_subscription_store(store))
+    try:
+        final, _, report = run(worker, {"end": "succeed"})
+    finally:
+        worker.shutdown()
+
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+    assert "PROBE_TOKEN" in report["env_names"]  # the agent credential does go in
+    assert TRACKER_TOKEN_NAMES.isdisjoint(report["env_names"])
+    assert report["git_credentials"] == {"helpers": [], "files": []}

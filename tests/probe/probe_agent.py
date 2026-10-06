@@ -236,6 +236,15 @@ def _attempt(fn: Callable[[], dict[str, Any]], what: dict[str, Any]) -> dict[str
         return {**what, "ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
+def report_git_credentials(ctx: dict[str, Any]) -> Any:
+    """Git credential helpers configured, and credential files present, for the agent's user."""
+    r = subprocess.run(["git", "config", "--get-all", "credential.helper"], capture_output=True, text=True)
+    candidates = [Path.home() / ".git-credentials", Path.home() / ".config" / "git" / "credentials",
+                  Path.home() / ".config" / "gh" / "hosts.yml", Path.home() / ".config" / "glab-cli" / "config.yml",
+                  Path.home() / ".netrc"]
+    return {"helpers": r.stdout.split(), "files": [str(p) for p in candidates if p.exists()]}
+
+
 def report_actions(ctx: dict[str, Any]) -> Any:
     """Results of the actions the script asked for (done before the report)."""
     return ctx.get("actions", [])
@@ -252,6 +261,7 @@ REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "skills_loaded": report_skills_loaded,
     "working_copies": report_working_copies,
     "local_tickets": report_local_tickets,
+    "git_credentials": report_git_credentials,
     "actions": report_actions,
 }
 

@@ -19,7 +19,7 @@ from .model import NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStat
 from .sandbox import Sandbox, stage_skills
 from .subscriptions import Lease
 from . import local_tickets
-from .push_gateway import GATEWAY_HOST, PushGateway, RunRemotes
+from .push_gateway import GATEWAY_HOST, PushGateway, RunRemotes, without_code_host_tokens
 from .staging import StagingError, StagingPlan, central_skills_version, read_repo_skills
 from .staging import plan as plan_skills
 from workflow_weave.central_skills import CentralSkills
@@ -171,12 +171,16 @@ class AgentWorker:
                 self.settings.runs_dir / rec.run_id / "remotes",
                 {t.name: (product.repos[t.name].source, t.integration_branch) for t in run.request.repos},
             )
+            env, dropped = without_code_host_tokens({"ACP_PROMPT_MAX_RETRIES": "0", **run.lease.env})
+            if dropped:
+                self._note(rec, f"left out of the sandbox environment (Tracker / Code host tokens): {dropped}")
             sandbox = Sandbox(
                 image=profile.image,
                 run_id=rec.run_id,
                 product=rec.product,
-                # The credential goes in as sandbox environment only (ADR 0010, #13).
-                env={"ACP_PROMPT_MAX_RETRIES": "0", **run.lease.env},
+                # The credential goes in as sandbox environment only (ADR 0010, #13);
+                # never a Tracker or Code host token (ADR 0009).
+                env=env,
                 nofile_limit=self.settings.sandbox_nofile_limit,
                 start_timeout=self.settings.sandbox_start_timeout,
                 # Read-only, so the agent cannot change the originals (ADR 0009).
