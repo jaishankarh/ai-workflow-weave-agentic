@@ -137,9 +137,9 @@ The deterministic service that moves Stories and Tasks from one State to the nex
 The one machine where every agent sandbox and Environment runs, shared by all Products, each Product capped in how many runs it may have at once. The Dispatchers live on it too.
 _Avoid:_ "server" alone, "staging" (the shared deploy target after merge).
 
-## Run dashboard
-A read-only page each Dispatcher serves showing its Run bookkeeping: live, queued and retried runs, their Agent profiles, durations, logs and cost. Never a place to act: every human action, from approving to restarting, happens on the Tracker.
-_Avoid:_ "console", "control panel" (both suggest it can change things).
+## Workflow dashboard
+The web page each Dispatcher serves for its Product: its Run bookkeeping (live, queued and retried runs, their Agent profiles, durations, logs and cost) and its Stories and Tasks by State. A human may act from it as from the Tracker (approve, restart, move a State, post a Human Finding), and every such action is a write to the Tracker, so the Tracker still holds every State and the same action taken on the Tracker has the same effect.
+_Avoid:_ "Run dashboard" (the earlier read-only page it replaces), "console" (suggests it holds its own state).
 
 ## Agent profile
 A named pairing of an agent (e.g. Cursor, Claude Code, or a model-agnostic loop) and a model, used for an agent run. A Product sets a default Agent profile per workflow node; a Task may override it.
