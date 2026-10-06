@@ -149,6 +149,12 @@ _Avoid:_ "agent" alone when the model matters too.
 The skills and MCP servers staged into one agent run. Skills come from the central skills repo plus the Repo's own; MCP servers come from a Product-wide catalog. A database MCP server only ever connects to that run's own Environment, wired from the services its Run recipes bring up, and is enabled only when a Run recipe brings up that database; never to a shared or production database.
 _Avoid:_ "plugins", "tools" alone (both also name an agent's built-in abilities).
 
+When a Repo's own skill shares a name with a central skill, the central skill is used unless a **Skill override** says otherwise. Every such clash is reported in the run's log.
+
+## Skill override
+A per-Repo entry in the Product's configuration naming one central skill for which that Repo's own skill of the same name is used instead. Names one skill, never all of them. Never allowed for a skill whose output the Dispatcher reads back (the fix and review skills, the test rules). A run covering several Repos uses a Repo's own skill only when every Repo in the run has that override and their own skills are identical; otherwise it falls back to the central skill and reports the disagreement.
+_Avoid:_ "Repo wins" as a blanket rule (overrides are per skill).
+
 ## Run bookkeeping
 What the Dispatcher remembers about work in flight: agent run IDs, infrastructure retry counts, deploy batches. Never consulted to decide a State; anything that decides one, such as Review rounds, is kept on the Tracker instead.
 _Avoid:_ "workflow state" for this.
