@@ -219,6 +219,51 @@ def push(branch: str) -> dict[str, Any]:
             "output": (r.stderr or r.stdout)[-1500:]}
 
 
+CODE_HOST_API = "https://api.github.com"
+# What each Tracker / Code host write would POST (REST, as `gh` does it).
+CODE_HOST_WRITES = {
+    "issue": "/repos/{repo}/issues",
+    "comment": "/repos/{repo}/issues/1/comments",
+    "label": "/repos/{repo}/issues/1/labels",
+    "pr": "/repos/{repo}/pulls",
+}
+TOKEN_VARS = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITLAB_TOKEN"]
+
+
+def find_code_host_credential() -> str | None:
+    """Where an agent could get a Code host credential: a token variable, or git's credential store."""
+    for name in TOKEN_VARS:
+        if os.environ.get(name):
+            return f"env {name}"
+    r = subprocess.run(["git", "credential", "fill"], input="protocol=https\nhost=github.com\n\n",
+                       capture_output=True, text=True, timeout=15,
+                       env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false"})
+    if r.returncode == 0 and "password=" in r.stdout:
+        return "git credential helper"
+    return None
+
+
+def code_host_write(write: str) -> dict[str, Any]:
+    """Try a Tracker / Code host write the way an agent would: find a credential, then POST."""
+    from urllib.request import Request, urlopen
+
+    result: dict[str, Any] = {"action": "code_host_write", "write": write, "ok": False}
+    result["credential_found"] = cred = find_code_host_credential()
+    if cred is None:
+        result["error"] = "no credentials for the Tracker or Code host"
+        return result
+    token = os.environ.get(cred.removeprefix("env "), "")
+    req = Request(CODE_HOST_API + CODE_HOST_WRITES[write].format(repo="weave-fixture/app"),
+                  data=b"{}", method="POST", headers={"Authorization": f"token {token}"})
+    try:
+        with urlopen(req, timeout=10) as resp:
+            result["ok"] = 200 <= resp.status < 300
+            result["status"] = resp.status
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {e}"
+    return result
+
+
 def run_actions(script: dict[str, Any], prompt_text: str) -> list[dict[str, Any]]:
     """Do what the script asks before reporting; each action's result goes in the report."""
     results = []
@@ -226,6 +271,8 @@ def run_actions(script: dict[str, Any], prompt_text: str) -> list[dict[str, Any]
         results.append(_attempt(lambda: mark_done(prompt_text, ticket), {"action": "mark_done", "ticket": ticket}))
     for branch in script.get("push", []):
         results.append(_attempt(lambda: push(branch), {"action": "push", "branch": branch}))
+    for write in script.get("code_host_writes", []):
+        results.append(_attempt(lambda: code_host_write(write), {"action": "code_host_write", "write": write}))
     return results
 
 

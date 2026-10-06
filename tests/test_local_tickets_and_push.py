@@ -121,3 +121,15 @@ def test_no_tracker_or_code_host_token_is_present_in_the_sandbox_environment(mak
     assert "PROBE_TOKEN" in report["env_names"]  # the agent credential does go in
     assert TRACKER_TOKEN_NAMES.isdisjoint(report["env_names"])
     assert report["git_credentials"] == {"helpers": [], "files": []}
+
+
+def test_an_attempt_to_create_an_issue_comment_label_or_open_a_pr_fails_for_lack_of_credentials(worker):
+    final, _, report = run(worker, {"end": "succeed", "code_host_writes": ["issue", "comment", "label", "pr"]})
+
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+    writes = {a["write"]: a for a in report["actions"] if a["action"] == "code_host_write"}
+    assert set(writes) == {"issue", "comment", "label", "pr"}
+    for write in writes.values():
+        assert not write["ok"], write
+        assert write["credential_found"] is None, write
+        assert "no credentials" in write["error"], write
