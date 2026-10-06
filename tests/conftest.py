@@ -25,6 +25,7 @@ from workflow_weave.agent_worker import (
     RunRequest,
     WorkerSettings,
     load_product_config,
+    load_subscription_store,
 )
 
 os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
@@ -34,6 +35,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SANDBOX_IMAGE = "weave/sandbox:test"
 PROBE_IMAGE = "weave/probe-agent:test"
 PRODUCT = "probe-product"
+# The Subscription the default Product leases: roomy enough never to be full.
+PROBE_SUBSCRIPTION = "probe-subscription"
 
 
 def _docker_build(tag: str, context: Path, build_args: dict[str, str]) -> None:
@@ -101,15 +104,27 @@ def runs_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def make_worker(
     tmp_path: Path, runs_dir: Path, onboarded_repo: Path, probe_profile: AgentProfile
-) -> Callable[[], AgentWorker]:
-    product_file = tmp_path / "product.yaml"
-    product_file.write_text(f"product: {PRODUCT}\nrepos:\n  app:\n    source: {onboarded_repo}\n")
+) -> Callable[..., AgentWorker]:
+    """Build a worker. `products` names Products that each have the onboarded Repo;
+    `subscriptions` is the Subscription store (default: one roomy Subscription for PRODUCT)."""
+    default_store = tmp_path / "subscriptions.yaml"
+    default_store.write_text(
+        f"subscriptions:\n  {PROBE_SUBSCRIPTION}:\n    agent: probe\n    cap: 10\n"
+        f"    env: {{PROBE_TOKEN: probe-token}}\n"
+        f"products:\n  {PRODUCT}:\n    probe: [{PROBE_SUBSCRIPTION}]\n"
+    )
 
-    def make() -> AgentWorker:
+    def product_config(name: str):
+        product_file = tmp_path / f"product-{name}.yaml"
+        product_file.write_text(f"product: {name}\nrepos:\n  app:\n    source: {onboarded_repo}\n")
+        return load_product_config(product_file)
+
+    def make(products: list[str] = [PRODUCT], subscriptions=None) -> AgentWorker:  # noqa: B006
         settings = WorkerSettings(
             runs_dir=runs_dir,
-            products={PRODUCT: load_product_config(product_file)},
+            products={name: product_config(name) for name in products},
             agent_profiles={"probe": probe_profile},
+            subscriptions=subscriptions or load_subscription_store(default_store),
             sandbox_nofile_limit=_nofile_limit(),
         )
         return AgentWorker(settings)
@@ -124,10 +139,10 @@ def worker(make_worker: Callable[[], AgentWorker]):
     w.shutdown()
 
 
-def probe_request(script: dict, *, branch: str = "story-1") -> RunRequest:
+def probe_request(script: dict, *, branch: str = "story-1", product: str = PRODUCT) -> RunRequest:
     """A run request whose spec tells the probe how to behave."""
     return RunRequest(
-        product=PRODUCT,
+        product=product,
         agent_profile="probe",
         repos=[RepoTarget(name="app", integration_branch=branch, base_branch="main")],
         skill="implement-spec",

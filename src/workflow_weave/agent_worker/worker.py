@@ -15,8 +15,9 @@ from openhands.sdk.agent import ACPAgent
 from openhands.sdk.conversation.response_utils import get_agent_final_response
 
 from .config import WorkerSettings
-from .model import Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
+from .model import NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
 from .sandbox import Sandbox
+from .subscriptions import Lease
 
 TERMINAL = {"finished", "error", "stuck"}
 # The agent is asked to end its last reply with one of these lines.
@@ -37,9 +38,10 @@ class UnknownRun(KeyError):
 
 
 class _Run:
-    def __init__(self, record: RunRecord, request: RunRequest) -> None:
+    def __init__(self, record: RunRecord, request: RunRequest, lease: Lease) -> None:
         self.record = record
         self.request = request
+        self.lease = lease
         self.cancel_requested = threading.Event()
         self.done = threading.Event()
         self.thread: threading.Thread | None = None
@@ -65,12 +67,25 @@ class AgentWorker:
         product = self.settings.products.get(request.product)
         if product is None:
             raise ValueError(f"unknown Product {request.product!r}")
-        if request.agent_profile not in self.settings.agent_profiles:
+        profile = self.settings.agent_profiles.get(request.agent_profile)
+        if profile is None:
             raise ValueError(f"unknown Agent profile {request.agent_profile!r}")
         for repo in request.repos:
             if repo.name not in product.repos:
                 raise ValueError(f"Repo {repo.name!r} is not part of Product {request.product!r}")
 
+        store = self.settings.subscriptions
+        agent = profile.agent_provider
+        lease = store.lease(request.product, agent)
+        if lease is None:
+            return NoCapacity(request.product, agent, store.associated(request.product, agent))
+        try:
+            return self._launch(request, lease)
+        except BaseException:
+            store.release(lease)
+            raise
+
+    def _launch(self, request: RunRequest, lease: Lease) -> Started:
         run_id = _new_run_id()
         run_dir = self.settings.runs_dir / run_id
         run_dir.mkdir(parents=True)
@@ -78,19 +93,20 @@ class AgentWorker:
             run_id=run_id,
             product=request.product,
             agent_profile=request.agent_profile,
+            subscription=lease.name,
             skill=request.skill,
             repos=[vars(r) for r in request.repos],
             state=RunState.RUNNING,
             started_at=_now(),
             event_log=run_dir / "events.jsonl",
         )
-        run = _Run(record, request)
+        run = _Run(record, request, lease)
         self._save(record)
         with self._lock:
             self._runs[run_id] = run
         run.thread = threading.Thread(target=self._execute, args=(run,), name=f"run-{run_id}", daemon=True)
         run.thread.start()
-        return Started(run_id)
+        return Started(run_id, lease.name)
 
     def status(self, run_id: str) -> RunStatus:
         with self._lock:
@@ -141,7 +157,8 @@ class AgentWorker:
                 image=profile.image,
                 run_id=rec.run_id,
                 product=rec.product,
-                env={"ACP_PROMPT_MAX_RETRIES": "0"},
+                # The credential goes in as sandbox environment only (ADR 0010, #13).
+                env={"ACP_PROMPT_MAX_RETRIES": "0", **run.lease.env},
                 nofile_limit=self.settings.sandbox_nofile_limit,
                 start_timeout=self.settings.sandbox_start_timeout,
             )
@@ -170,6 +187,7 @@ class AgentWorker:
             final = (RunState.ENDED, Outcome.INFRA_FAILURE, f"{type(e).__name__}: {e}"[:2000])
         finally:
             leftovers = self._stop(conversation, sandbox, rec)
+            self.settings.subscriptions.release(run.lease)  # however the run ended
         rec.processes_left_after_close = leftovers
         if leftovers:
             self._note(rec, f"processes still running after the agent was closed: {leftovers}")

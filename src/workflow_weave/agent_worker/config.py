@@ -7,6 +7,8 @@ from pathlib import Path
 
 import yaml
 
+from .subscriptions import SubscriptionStore
+
 
 @dataclass(frozen=True)
 class RepoConfig:
@@ -51,12 +53,21 @@ def load_product_config(path: str | Path) -> ProductConfig:
 
 @dataclass(frozen=True)
 class AgentProfile:
-    """How to run one agent in a sandbox: its image and ACP command."""
+    """How to run one agent in a sandbox: its image and ACP command.
+
+    `agent` is the agent provider whose Subscriptions it runs on (e.g.
+    `claude-code`); it defaults to the profile's name.
+    """
 
     name: str
     image: str
     acp_command: list[str]
     acp_session_mode: str | None = None
+    agent: str | None = None
+
+    @property
+    def agent_provider(self) -> str:
+        return self.agent or self.name
 
 
 @dataclass(frozen=True)
@@ -64,6 +75,8 @@ class WorkerSettings:
     runs_dir: Path
     products: dict[str, ProductConfig]
     agent_profiles: dict[str, AgentProfile]
+    # Shared by every worker on the Sandbox host: it holds the live leases.
+    subscriptions: SubscriptionStore
     # `docker run --ulimit nofile=N:N`; None leaves Docker's default.
     sandbox_nofile_limit: int | None = 65536
     sandbox_start_timeout: float = 120.0

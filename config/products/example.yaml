@@ -1,6 +1,6 @@
 # One Product's configuration (read by workflow_weave.agent_worker.load_product_config).
-# Later tickets add per-Repo skill_overrides, coding_standards and rules_files,
-# and the Product's Subscription associations.
+# Later tickets add per-Repo skill_overrides, coding_standards and rules_files.
+# (Its Subscription associations live in the Subscription store, not here: ADR 0010.)
 product: ahdismoi
 repos:
   ahdismoi:
