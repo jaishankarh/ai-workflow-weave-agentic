@@ -21,8 +21,11 @@ worker.cancel(started.run_id)   # closes the agent's conversation, removes the s
 agent from the Subscription store (ADR 0010): the first associated
 Subscription below its cap, in the Product's fallback order. It returns
 `Started(run_id, subscription)`, or `NoCapacity(product, agent, subscriptions)`
-when every associated Subscription is full (not an outcome; queue and retry).
-The lease is released however the run ends, cancel included. The credential
+when every associated Subscription is full (not an outcome; queue and retry),
+or `NeedsSetup(reason)` (outcome `needs-setup`) when a pre-check fails, without
+taking a lease or starting a sandbox. The pre-checks, in order: the Product has a
+Subscription associated for the agent; every Repo has a `CONTEXT.md` on its Base
+branch. The lease is released however the run ends, cancel included. The credential
 goes only into the sandbox environment; results and run records carry the
 Subscription's name. The store is one YAML file on the Sandbox host
 (`subscription_store.location` in `weave.yaml`; format in
@@ -30,6 +33,24 @@ Subscription's name. The store is one YAML file on the Sandbox host
 `load_configured_subscription_store` and passed as `WorkerSettings.subscriptions`.
 Lease counts live in that store object, so share one store among all workers
 on a host.
+
+### Outcomes
+
+A run that ends on its own has exactly one outcome; every outcome but
+`succeeded` has a reason naming the problem and carrying the underlying error.
+Agent errors are classified from the agent's own `errorKind`, never OpenHands'
+codes; the table is `AgentProfile.error_kinds` (default: claude-agent-acp's).
+
+| How the run ended | Outcome |
+|---|---|
+| Agent's last reply ends `RUN-OUTCOME: done` | `succeeded` |
+| Agent finished otherwise, or with `RUN-OUTCOME: gave-up: <why>` | `agent-gave-up` |
+| Agent error `errorKind` `authentication_failed`, or ACP code -32000 | `needs-setup` |
+| Agent error `errorKind` `rate_limit` / `billing_error` | `quota-exhausted` |
+| Any other agent error, a sandbox that fails to start or dies mid-run, unreachable Central skills | `infra-failure` |
+
+`ACP_PROMPT_MAX_RETRIES=0` is set in every sandbox, so a rejected credential
+surfaces in seconds; infrastructure retries are the caller's.
 
 Each run's `record.json` and conversation `events.jsonl` are kept under
 `runs_dir/<run id>/`, outside the sandbox.
