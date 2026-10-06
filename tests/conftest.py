@@ -3,7 +3,8 @@
 Images are built once per session. Environment knobs (see README):
   WEAVE_TEST_BASE_IMAGE      base image for the sandbox image (default ubuntu:24.04)
   WEAVE_TEST_BUILD_NETWORK   value for `docker build --network` (e.g. host)
-  WEAVE_TEST_SKIP_BUILD=1    use already built weave/sandbox:test and weave/probe-agent:test
+  WEAVE_TEST_SKIP_BUILD=1    use already built weave/sandbox:<tag> and weave/probe-agent:<tag>
+  WEAVE_TEST_IMAGE_TAG       the <tag> above (default test); give each worktree its own
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from typing import Callable
 
 import pytest
 
+from workflow_weave import central_skills
 from workflow_weave.agent_worker import (
     AgentProfile,
     AgentWorker,
@@ -32,8 +34,9 @@ os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 ROOT = Path(__file__).resolve().parent.parent
-SANDBOX_IMAGE = "weave/sandbox:test"
-PROBE_IMAGE = "weave/probe-agent:test"
+_TAG = os.environ.get("WEAVE_TEST_IMAGE_TAG", "test")
+SANDBOX_IMAGE = f"weave/sandbox:{_TAG}"
+PROBE_IMAGE = f"weave/probe-agent:{_TAG}"
 PRODUCT = "probe-product"
 # The Subscription the default Product leases: roomy enough never to be full.
 PROBE_SUBSCRIPTION = "probe-subscription"
@@ -101,12 +104,17 @@ def runs_dir(tmp_path: Path) -> Path:
     return tmp_path / "runs"
 
 
+# This repo's own Central skills (the real upstream copy), found through weave.yaml.
+REPO_CENTRAL_SKILLS = central_skills.load(ROOT / "weave.yaml").location
+
+
 @pytest.fixture
 def make_worker(
     tmp_path: Path, runs_dir: Path, onboarded_repo: Path, probe_profile: AgentProfile
 ) -> Callable[..., AgentWorker]:
-    """Build a worker. `products` names Products that each have the onboarded Repo;
-    `subscriptions` is the Subscription store (default: one roomy Subscription for PRODUCT)."""
+    """Build a worker. `products` names Products that each have the onboarded Repo
+    (`product_yaml`, if given, replaces PRODUCT's config); `subscriptions` is the
+    Subscription store (default: one roomy Subscription for PRODUCT)."""
     default_store = tmp_path / "subscriptions.yaml"
     default_store.write_text(
         f"subscriptions:\n  {PROBE_SUBSCRIPTION}:\n    agent: probe\n    cap: 10\n"
@@ -114,18 +122,28 @@ def make_worker(
         f"products:\n  {PRODUCT}:\n    probe: [{PROBE_SUBSCRIPTION}]\n"
     )
 
-    def product_config(name: str):
+    def product_config(name: str, product_yaml: str | None):
         product_file = tmp_path / f"product-{name}.yaml"
-        product_file.write_text(f"product: {name}\nrepos:\n  app:\n    source: {onboarded_repo}\n")
+        if product_yaml is not None and name == PRODUCT:
+            product_file.write_text(product_yaml)
+        else:
+            product_file.write_text(f"product: {name}\nrepos:\n  app:\n    source: {onboarded_repo}\n")
         return load_product_config(product_file)
 
-    def make(products: list[str] = [PRODUCT], subscriptions=None) -> AgentWorker:  # noqa: B006
+    def make(
+        products: list[str] = [PRODUCT],  # noqa: B006
+        subscriptions=None,
+        *,
+        product_yaml: str | None = None,
+        central_skills_location: Path = REPO_CENTRAL_SKILLS,
+    ) -> AgentWorker:
         settings = WorkerSettings(
             runs_dir=runs_dir,
-            products={name: product_config(name) for name in products},
+            products={name: product_config(name, product_yaml) for name in products},
             agent_profiles={"probe": probe_profile},
             subscriptions=subscriptions or load_subscription_store(default_store),
             sandbox_nofile_limit=_nofile_limit(),
+            central_skills_location=central_skills_location,
         )
         return AgentWorker(settings)
 
@@ -139,13 +157,20 @@ def worker(make_worker: Callable[[], AgentWorker]):
     w.shutdown()
 
 
-def probe_request(script: dict, *, branch: str = "story-1", product: str = PRODUCT) -> RunRequest:
+def probe_request(
+    script: dict,
+    *,
+    branch: str = "story-1",
+    product: str = PRODUCT,
+    skill: str = "implement-spec",
+    repos: list[str] = ("app",),
+) -> RunRequest:
     """A run request whose spec tells the probe how to behave."""
     return RunRequest(
         product=product,
         agent_profile="probe",
-        repos=[RepoTarget(name="app", integration_branch=branch, base_branch="main")],
-        skill="implement-spec",
+        repos=[RepoTarget(name=r, integration_branch=branch, base_branch="main") for r in repos],
+        skill=skill,
         inputs=RunInputs(spec=f"A spec for the probe.\nprobe: {json.dumps(script)}\n", tasks=["Task one"]),
     )
 

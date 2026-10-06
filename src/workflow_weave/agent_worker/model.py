@@ -115,6 +115,13 @@ class RunRecord:
     # Processes still alive in the sandbox after the agent's conversation was
     # closed, just before the sandbox was removed. Should always be empty.
     processes_left_after_close: list[str] | None = None
+    # Central skills used: {"version", "upstream_commit", "upstream_repository"}.
+    central_skills: dict | None = None
+    # Skills staged at user level, and central skills not staged because a Skill override applied.
+    skills_staged: list[str] | None = None
+    skill_overrides_applied: list[str] | None = None
+    # Every clash with a Repo's own skill and every override disagreement (also in run.log).
+    skill_clashes: list[str] | None = None
 
     def status(self) -> RunStatus:
         return RunStatus(self.run_id, self.state, self.outcome, self.reason)

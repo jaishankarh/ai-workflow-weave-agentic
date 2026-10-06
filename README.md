@@ -34,6 +34,19 @@ on a host.
 Each run's `record.json` and conversation `events.jsonl` are kept under
 `runs_dir/<run id>/`, outside the sandbox.
 
+### Skill staging
+
+Each run stages the requested skill and every skill it calls into the agent's
+user-level skills folder (`~/.claude/skills/`) in the sandbox, never into a
+working copy (`WorkerSettings.central_skills_location`). A skill "calls"
+another when a line of its `SKILL.md` mentions the Skill tool and names it in
+backticks or double quotes (see `agent_worker/staging.py`). A Repo's
+`skill_overrides` in the Product config leaves that central skill unstaged so
+the Repo's own `.claude/skills/<name>` loads instead; overrides of
+`PROTECTED_SKILLS` are refused on load. Clashes and override disagreements go
+to `run.log` and the record's `skill_clashes`; the record's `central_skills`
+holds the Central skills version and upstream commit.
+
 ### Images
 
 - `sandbox/Dockerfile`: the base sandbox image (agent-server, git, Python).
@@ -67,6 +80,7 @@ Environment knobs for the test harness:
 | `WEAVE_TEST_BASE_IMAGE` | Base image for the sandbox image (default `ubuntu:24.04`) |
 | `WEAVE_TEST_BUILD_NETWORK` | Passed to `docker build --network` |
 | `WEAVE_TEST_SKIP_BUILD=1` | Reuse the already built test images |
+| `WEAVE_TEST_IMAGE_TAG` | Tag for the test images (default `test`); use one per worktree |
 | `WEAVE_TEST_SANDBOX_NOFILE` | Sandbox open-files limit (default 65536; `0` = Docker's default) |
 
 On a host with no image registry and a low open-files cap (such as the cloud

@@ -7,7 +7,15 @@
     worker.cancel(started.run_id)            # closes the conversation, removes the sandbox
 """
 
-from .config import AgentProfile, ProductConfig, RepoConfig, WorkerSettings, load_product_config
+from .config import (
+    PROTECTED_SKILLS,
+    AgentProfile,
+    ProductConfig,
+    ProductConfigError,
+    RepoConfig,
+    WorkerSettings,
+    load_product_config,
+)
 from .subscriptions import (
     Lease,
     Subscription,
@@ -35,7 +43,9 @@ __all__ = [
     "Lease",
     "NoCapacity",
     "Outcome",
+    "PROTECTED_SKILLS",
     "ProductConfig",
+    "ProductConfigError",
     "RepoConfig",
     "RepoTarget",
     "RunInputs",
