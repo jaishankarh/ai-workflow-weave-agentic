@@ -8,10 +8,20 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import pytest
-from conftest import make_repo, probe_reports, probe_request, sandboxes_of, wait_for, wait_until_ended
+from conftest import (
+    make_repo,
+    probe_reports,
+    probe_request,
+    sandbox_processes,
+    sandboxes_of,
+    wait_for,
+    wait_until_ended,
+)
 
 from workflow_weave.agent_worker import NeedsSetup, Outcome, RunState, Started, load_subscription_store
 
@@ -129,3 +139,102 @@ def test_a_product_with_no_subscription_for_the_agent_is_needs_setup_and_no_sand
 
     assert PRODUCT in refused.reason
     assert "Subscription" in refused.reason and "probe" in refused.reason
+
+
+# --------------------------------------------------------------------------- the agent's error kind
+
+
+def test_a_probe_emitting_an_authentication_failure_error_kind_is_needs_setup_and_the_reason_includes_the_error(
+    worker,
+):
+    _, final = _run(
+        worker,
+        {"end": "error", "errorKind": "authentication_failed", "message": "401 Invalid bearer token"},
+    )
+
+    assert final.state is RunState.ENDED
+    assert final.outcome is Outcome.NEEDS_SETUP
+    assert "credential" in final.reason  # the problem
+    assert "401 Invalid bearer token" in final.reason and "authentication_failed" in final.reason  # the error
+
+
+def test_an_agent_answering_with_acps_authentication_required_code_is_needs_setup(worker):
+    # claude-agent-acp's answer when Claude Code says "Please run /login": no errorKind.
+    _, final = _run(worker, {"end": "error", "code": -32000, "errorKind": None, "message": "Authentication required"})
+
+    assert final.outcome is Outcome.NEEDS_SETUP
+    assert "credential" in final.reason and "Authentication required" in final.reason
+
+
+@pytest.mark.parametrize("kind", ["rate_limit", "billing_error"])
+def test_a_probe_emitting_a_rate_limit_or_billing_error_kind_is_quota_exhausted(worker, kind):
+    _, final = _run(worker, {"end": "error", "errorKind": kind, "message": "You've hit your limit"})
+
+    assert final.outcome is Outcome.QUOTA_EXHAUSTED
+    assert "usage limit" in final.reason
+    assert "You've hit your limit" in final.reason and kind in final.reason
+
+
+def test_classification_uses_the_agents_error_kind_not_the_error_text(worker):
+    # The text looks like an auth failure (OpenHands itself would call it ACPAuthRequired),
+    # but the agent's own error kind says rate limit.
+    _, final = _run(worker, {"end": "error", "errorKind": "rate_limit", "message": "401 Unauthorized: credential"})
+
+    assert final.outcome is Outcome.QUOTA_EXHAUSTED
+
+
+def test_an_agent_error_with_an_unknown_or_no_error_kind_is_infra_failure_with_the_error(worker):
+    _, unknown = _run(worker, {"end": "error", "errorKind": "server_error", "message": "upstream 500"})
+    _, none = _run(worker, {"end": "error", "errorKind": None, "message": "the agent crashed"})
+
+    assert unknown.outcome is Outcome.INFRA_FAILURE
+    assert "agent failed" in unknown.reason and "upstream 500" in unknown.reason and "server_error" in unknown.reason
+    assert none.outcome is Outcome.INFRA_FAILURE
+    assert "agent failed" in none.reason and "the agent crashed" in none.reason
+
+
+def test_a_failing_credential_is_reported_without_the_sdks_default_multi_retry_delay(worker):
+    started, final = _run(worker, {"end": "error", "errorKind": "authentication_failed", "message": "401"})
+    record = worker.record(started.run_id)
+
+    # Every prompt attempt makes the probe report; the SDK's default would make four
+    # attempts, 5 s + 15 s + 30 s apart.
+    assert final.outcome is Outcome.NEEDS_SETUP
+    assert len(probe_reports(record.event_log)) == 1
+    reported_at = _event_times(record.event_log, "ACPToolCallEvent")[0]
+    errored_at = _event_times(record.event_log, "ConversationErrorEvent")[-1]
+    assert (errored_at - reported_at).total_seconds() < 4
+
+
+def _event_times(event_log: Path, kind: str):
+    times = []
+    for line in event_log.read_text().splitlines():
+        ev = json.loads(line)
+        if ev.get("kind") == kind:
+            times.append(datetime.fromisoformat(ev["timestamp"]))
+    assert times, f"no {kind} in the event log"
+    return times
+
+
+# --------------------------------------------------------------------------- the sandbox
+
+
+def test_a_sandbox_that_fails_to_come_up_is_infra_failure(worker, probe_profile):
+    worker.settings.agent_profiles["probe"] = replace(probe_profile, image="weave/no-such-image:t38")
+    _, final = _run(worker, {"end": "succeed"})
+
+    assert final.outcome is Outcome.INFRA_FAILURE
+    assert "sandbox" in final.reason and "weave/no-such-image:t38" in final.reason
+
+
+def test_a_sandbox_that_dies_mid_run_is_infra_failure(worker):
+    started = worker.start(probe_request({"end": "hang", "command": "sleep 600"}, product=PRODUCT))
+    [sandbox] = wait_for(lambda: sandboxes_of(started.run_id), what="the run's sandbox")
+    wait_for(lambda: "sleep 600" in sandbox_processes(sandbox), what="the probe's hanging command")
+
+    subprocess.run(["docker", "kill", sandbox], check=True, capture_output=True)
+    final = wait_until_ended(worker, started.run_id, timeout=120)
+
+    assert final.state is RunState.ENDED
+    assert final.outcome is Outcome.INFRA_FAILURE
+    assert "sandbox" in final.reason

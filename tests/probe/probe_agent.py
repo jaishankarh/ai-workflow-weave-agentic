@@ -19,8 +19,10 @@ claude-agent-acp, Cursor's `agent acp`). On each prompt it:
    - ``{"end": "error", "errorKind": "rate_limit", "message": "..."}``  fails
      the prompt the way claude-agent-acp fails a turn: a JSON-RPC internal
      error (-32603, which the SDK retries unless ``ACP_PROMPT_MAX_RETRIES``
-     caps it) whose details end with ``{"errorKind": "..."}``. Every attempt
-     is counted in ``/tmp/probe-prompt-attempts``.
+     caps it) with the message as its text and ``{"errorKind": "..."}`` as its
+     data (``"errorKind": null`` sends no data; ``"code"`` changes the JSON-RPC
+     code, e.g. -32000, ACP's "authentication required"). Every attempt is counted in
+     ``/tmp/probe-prompt-attempts``.
 
 Add a new report item by adding a function to ``REPORTERS``.
 """
@@ -284,7 +286,9 @@ class ProbeAgent:
         if end == "error":
             kind = script.get("errorKind", "authentication_failed")
             message = script.get("message", f"the probe was told to fail with {kind}")
-            raise RequestError.internal_error({"details": f"{message}: {json.dumps({'errorKind': kind})}"})
+            # Exactly how claude-agent-acp fails a turn: RequestError.internalError({errorKind}, resultText).
+            code = int(script.get("code", -32603))
+            raise RequestError(code, message, {"errorKind": kind} if kind else None)
         raise ValueError(f"unknown probe end: {end!r}")
 
     def kill_commands(self) -> None:

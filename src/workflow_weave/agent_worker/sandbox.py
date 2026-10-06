@@ -124,6 +124,16 @@ class Sandbox:
             out.append(args)
         return out
 
+    def stopped(self) -> str | None:
+        """None while the sandbox is running; otherwise how it stopped."""
+        r = _docker("inspect", "-f", "{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}", self.container_id)
+        if r.returncode != 0:
+            return "sandbox is gone from the Sandbox host"
+        running, code, oom = (r.stdout.split() + ["", "", ""])[:3]
+        if running == "true":
+            return None
+        return f"sandbox stopped (exit code {code}{', out of memory' if oom == 'true' else ''})"
+
     def destroy(self) -> None:
         _docker("rm", "-f", self.container_id, timeout=60)
 
