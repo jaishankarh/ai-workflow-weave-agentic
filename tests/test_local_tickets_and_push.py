@@ -53,3 +53,13 @@ def test_the_probe_finds_the_spec_and_each_task_as_local_tickets_and_cannot_modi
     # Every original refused every change the probe tried (write, delete, chmod).
     assert tickets["originals"], "the probe found no originals to try"
     assert tickets["originals_changed"] == []
+
+
+def test_tickets_the_probe_marks_done_are_listed_in_the_run_result(make_worker):
+    worker = make_worker()
+    final, record, _ = run(worker, {"end": "succeed", "mark_done": ["spec", "02"]})
+
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+    assert record.tickets_done == ["spec", "02"]
+    # It is part of the saved result, read back without the sandbox.
+    assert make_worker().record(record.run_id).tickets_done == ["spec", "02"]

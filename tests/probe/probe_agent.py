@@ -194,6 +194,35 @@ def try_to_change(folder: Path) -> list[str]:
     return changed
 
 
+def _tracker_dir(prompt_text: str) -> Path:
+    doc = Path(_TRACKER_DOC_IN_PROMPT.search(prompt_text).group(1)).read_text()
+    return Path(re.search(r"Tickets live in `([^`]+)`", doc).group(1))
+
+
+def mark_done(prompt_text: str, ticket: str) -> dict[str, Any]:
+    """Close a ticket the way the tracker description says: set its Status line to done."""
+    folder = _tracker_dir(prompt_text)
+    [path] = [folder / "spec.md"] if ticket == "spec" else sorted((folder / "issues").glob(f"{ticket}-*.md"))
+    text = re.sub(r"^Status:.*$", "Status: done", path.read_text(), count=1, flags=re.MULTILINE)
+    path.write_text(text)
+    return {"action": "mark_done", "ticket": ticket, "ok": True}
+
+
+def run_actions(script: dict[str, Any], prompt_text: str) -> list[dict[str, Any]]:
+    """Do what the script asks before reporting; each action's result goes in the report."""
+    results = []
+    for ticket in script.get("mark_done", []):
+        results.append(_attempt(lambda: mark_done(prompt_text, ticket), {"action": "mark_done", "ticket": ticket}))
+    return results
+
+
+def _attempt(fn: Callable[[], dict[str, Any]], what: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return fn()
+    except Exception as e:
+        return {**what, "ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
 def report_actions(ctx: dict[str, Any]) -> Any:
     """Results of the actions the script asked for (done before the report)."""
     return ctx.get("actions", [])
@@ -280,7 +309,8 @@ class ProbeAgent:
     async def prompt(self, session_id: str, prompt: list[Any], **kwargs: Any) -> PromptResponse:
         text = "\n".join(getattr(b, "text", "") or "" for b in prompt)
         script = parse_script(text)
-        report = build_report({"cwd": self._cwd, "script": script, "prompt": text})
+        actions = run_actions(script, text)
+        report = build_report({"cwd": self._cwd, "script": script, "prompt": text, "actions": actions})
         leave_markers()
         await self._send(
             session_id,
