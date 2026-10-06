@@ -146,7 +146,7 @@ A named pairing of an agent (e.g. Cursor, Claude Code, or a model-agnostic loop)
 _Avoid:_ "agent" alone when the model matters too.
 
 ## Subscription
-One stored account credential for one agent provider (a Claude Code, Cursor or Kimi Code account, or any other agent reached the same way), created once and named. A Product is associated with one or more Subscriptions per agent, in fallback order; a run uses an Agent profile together with a Subscription from its own Product's list, and never one associated only with another Product. Each Subscription has its own cap on runs at once, shared by every Product that uses it.
+One stored account credential for one agent provider (a Claude Code, Cursor or Kimi Code account, or any other agent reached the same way), created once and named. A Product is associated with one or more Subscriptions per agent, in fallback order; a run uses an Agent profile together with a Subscription from its own Product's list, and never one associated only with another Product. Each Subscription has its own cap on runs at once, shared by every Product that uses it. Owned by the Sandbox host, not by any Product; a run leases one, and the Product's association list is the only authority on which Subscriptions it may lease.
 _Avoid:_ "token", "API key" alone (a Subscription is the account, whatever credential reaches it); "account" alone (also the human's Tracker login).
 
 ## Agent toolset
