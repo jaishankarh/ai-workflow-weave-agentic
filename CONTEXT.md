@@ -84,7 +84,7 @@ _Avoid:_ "code review" alone (also names the implementer's self-review and the h
 ## Finding
 One problem the Agent review reports on a Task's change, with an id unique within its Review round (e.g. `R2-F3`). Either **blocking** or **non-blocking** (a style nit, naming, an optional refactor). Only blocking Findings cause a fix; non-blocking ones are passed to the human reviewer. A blocking Finding has a **Severity** fixed by its category:
 - **High:** a bug, an unmet Acceptance criterion, an Acceptance criterion with no test, a broken test, a security issue.
-- **Low:** a breach of the Product's coding standards; a test that is off-Seam, untraced to an Acceptance criterion, tautological, implementation-coupled or structural.
+- **Low:** a breach of the Repo's **Coding standards**; a test that is off-Seam, untraced to an Acceptance criterion, tautological, implementation-coupled or structural.
 
 ## Human Finding
 A blocking Finding a human writes as a comment on the Story starting with the `/weave finding` command, numbered within its round (e.g. `R2-H1`) and always High. It may only name a bug or an unmet existing Acceptance criterion; new scope goes through grilling as a new Task or a Follow-up Story. Posted while a run is live, it waits for the next fix run; posted while the Story waits for Proofs or human review, it counts as a rejection. The fix run must answer it; a declined Human Finding sends the Story to needs-human at once, never to the Agent review.
@@ -154,6 +154,10 @@ When a Repo's own skill shares a name with a central skill, the central skill is
 ## Skill override
 A per-Repo entry in the Product's configuration naming one central skill for which that Repo's own skill of the same name is used instead. Names one skill, never all of them. Never allowed for a skill whose output the Dispatcher reads back (the fix and review skills, the test rules). A run covering several Repos uses a Repo's own skill only when every Repo in the run has that override and their own skills are identical; otherwise it falls back to the central skill and reports the disagreement.
 _Avoid:_ "Repo wins" as a blanket rule (overrides are per skill).
+
+## Coding standards
+The rules the Agent review holds a Repo's change to, beyond what Checks enforce; a breach is a Low Finding. Each Repo's setting in the Product's configuration selects them: **central** (default) is the Product's one coding-standards file; **central+repo** adds the Repo's own named rules files; **repo** uses the Repo's own named rules files alone. The Repo's own rules are always read as they stand on its Base branch, so a PR cannot relax a rule it breaks.
+_Avoid:_ "style guide" (suggests non-blocking nits), "lint rules" (Checks enforce those).
 
 ## Run bookkeeping
 What the Dispatcher remembers about work in flight: agent run IDs, infrastructure retry counts, deploy batches. Never consulted to decide a State; anything that decides one, such as Review rounds, is kept on the Tracker instead.
