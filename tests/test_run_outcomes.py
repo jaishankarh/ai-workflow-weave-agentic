@@ -17,10 +17,8 @@ from conftest import (
     make_repo,
     probe_reports,
     probe_request,
-    sandbox_processes,
-    sandboxes_of,
-    wait_for,
     wait_until_ended,
+    wait_until_hanging,
 )
 
 from workflow_weave.agent_worker import NeedsSetup, Outcome, RunState, Started, load_subscription_store
@@ -229,8 +227,7 @@ def test_a_sandbox_that_fails_to_come_up_is_infra_failure(worker, probe_profile)
 
 def test_a_sandbox_that_dies_mid_run_is_infra_failure(worker):
     started = worker.start(probe_request({"end": "hang", "command": "sleep 600"}, product=PRODUCT))
-    [sandbox] = wait_for(lambda: sandboxes_of(started.run_id), what="the run's sandbox")
-    wait_for(lambda: "sleep 600" in sandbox_processes(sandbox), what="the probe's hanging command")
+    sandbox = wait_until_hanging(worker, started.run_id, "sleep 600")
 
     subprocess.run(["docker", "kill", sandbox], check=True, capture_output=True)
     final = wait_until_ended(worker, started.run_id, timeout=120)

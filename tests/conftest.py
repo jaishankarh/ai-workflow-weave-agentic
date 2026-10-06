@@ -191,6 +191,32 @@ def wait_until_ended(worker: AgentWorker, run_id: str, timeout: float = 180):
     return wait_for(lambda: (s := worker.status(run_id)).is_final and s, timeout, what=f"run {run_id} to end")
 
 
+def wait_until_hanging(worker: AgentWorker, run_id: str, command: str) -> str:
+    """Wait until a hang-scripted probe is running its command; return the run's sandbox.
+
+    Watches the run's live event log for the probe's "hanging command" tool call
+    (sent just after the command started) rather than polling the sandbox, and fails
+    at once if the run ends first. The budget covers a slow sandbox start under load.
+    """
+    budget = worker.settings.sandbox_start_timeout + 180
+
+    def hanging() -> bool:
+        status = worker.status(run_id)
+        assert not status.is_final, f"run ended before its command hung: {status}"
+        log = worker.record(run_id).event_log
+        if not log or not log.exists():
+            return False
+        return any(
+            f'"hanging command: {command}"' in line and '"ACPToolCallEvent"' in line
+            for line in log.read_text().splitlines()
+        )
+
+    wait_for(hanging, budget, interval=1.0, what=f"run {run_id}'s command `{command}` to hang")
+    [sandbox] = sandboxes_of(run_id)
+    assert command in sandbox_processes(sandbox)
+    return sandbox
+
+
 # --------------------------------------------------------------------------- Sandbox host views
 
 

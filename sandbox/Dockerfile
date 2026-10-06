@@ -23,8 +23,11 @@ RUN python3 -m venv /opt/oh \
       openhands-tools==${OPENHANDS_VERSION}
 
 # IS_SANDBOX tells agent CLIs (Claude Code) they may skip permission prompts.
+# LITELLM_LOCAL_MODEL_COST_MAP: the agent-server otherwise fetches LiteLLM's cost map at
+# start-up, and a race in its retry thread sometimes kills the server before it is healthy.
 ENV PATH=/opt/oh/bin:/usr/local/bin:/usr/bin:/bin \
     OPENHANDS_SUPPRESS_BANNER=1 \
+    LITELLM_LOCAL_MODEL_COST_MAP=True \
     IS_SANDBOX=1
 
 RUN git config --system user.name "weave agent" \

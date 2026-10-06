@@ -191,7 +191,7 @@ class AgentWorker:
                 run_id=rec.run_id,
                 product=rec.product,
                 # The credential goes in as sandbox environment only (ADR 0010, #13).
-                env={"ACP_PROMPT_MAX_RETRIES": "0", **run.lease.env},
+                env={**run.lease.env, "ACP_PROMPT_MAX_RETRIES": "0"},
                 nofile_limit=self.settings.sandbox_nofile_limit,
                 start_timeout=self.settings.sandbox_start_timeout,
             )
@@ -250,7 +250,7 @@ class AgentWorker:
                 return status
             if time.monotonic() >= next_check:
                 if how := sandbox.stopped():
-                    raise SandboxError(f"{how} mid-run")
+                    raise SandboxError(f"{how} mid-run: {sandbox.last_logs(500)}")
                 next_check = time.monotonic() + SANDBOX_CHECK_INTERVAL
 
     def _stop(self, conversation: Any, sandbox: Sandbox | None, rec: RunRecord) -> list[str] | None:

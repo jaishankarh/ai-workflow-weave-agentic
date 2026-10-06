@@ -11,10 +11,10 @@ from conftest import (
     PRODUCT,
     probe_reports,
     probe_request,
-    sandbox_processes,
     sandboxes_of,
     wait_for,
     wait_until_ended,
+    wait_until_hanging,
 )
 
 from workflow_weave.agent_worker import Outcome, RunState, Started
@@ -103,10 +103,9 @@ def test_run_record_and_event_log_are_saved_outside_the_sandbox_and_outlive_it(m
 
 def test_cancel_stops_a_hanging_command_and_the_agent_and_status_reports_cancelled(worker):
     started = worker.start(probe_request({"end": "hang", "command": "sleep 600"}))
-    [sandbox] = wait_for(lambda: sandboxes_of(started.run_id), what="the run's sandbox")
-    wait_for(lambda: "sleep 600" in sandbox_processes(sandbox), what="the probe's hanging command")
+    wait_until_hanging(worker, started.run_id, "sleep 600")
 
-    status = worker.cancel(started.run_id)
+    status = worker.cancel(started.run_id, timeout=300)
 
     assert status.is_cancelled
     assert status.outcome is None
@@ -125,10 +124,9 @@ def test_cancel_closes_the_conversation_rather_than_interrupting_it(worker):
     # The probe, like Claude Code, keeps a command running after an interrupt
     # (ACP session/cancel). Only closing the conversation stops it.
     started = worker.start(probe_request({"end": "hang", "command": "sleep 600"}))
-    [sandbox] = wait_for(lambda: sandboxes_of(started.run_id), what="the run's sandbox")
-    wait_for(lambda: "sleep 600" in sandbox_processes(sandbox), what="the probe's hanging command")
+    wait_until_hanging(worker, started.run_id, "sleep 600")
 
-    worker.cancel(started.run_id)
+    assert worker.cancel(started.run_id, timeout=300).is_cancelled
 
     record = worker.record(started.run_id)
     assert record.processes_left_after_close == []
