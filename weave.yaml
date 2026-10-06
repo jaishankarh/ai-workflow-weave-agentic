@@ -1,0 +1,4 @@
+# AI Workflow Weave configuration.
+central_skills:
+  # Where the Central skills live, relative to this file (may move to its own repo later).
+  location: skills

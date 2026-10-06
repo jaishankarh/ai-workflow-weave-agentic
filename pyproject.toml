@@ -10,6 +10,9 @@ dependencies = [
     "pyyaml>=6",
 ]
 
+[project.scripts]
+weave-skills = "workflow_weave.central_skills:main"
+
 [dependency-groups]
 dev = ["pytest>=8"]
 
