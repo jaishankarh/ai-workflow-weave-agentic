@@ -2,7 +2,7 @@
 
     worker = AgentWorker(settings)
     started = worker.start(RunRequest(...))   # returns at once
-    # started: Started(run_id, subscription) | NoCapacity
+    # started: Started(run_id, subscription) | NoCapacity | NeedsSetup
     worker.status(started.run_id)            # running | cancelled | outcome + reason
     worker.cancel(started.run_id)            # closes the conversation, removes the sandbox
 """
@@ -24,6 +24,7 @@ from .subscriptions import (
     load_subscription_store,
 )
 from .model import (
+    NeedsSetup,
     NoCapacity,
     Outcome,
     RepoTarget,
@@ -41,6 +42,7 @@ __all__ = [
     "AgentProfile",
     "AgentWorker",
     "Lease",
+    "NeedsSetup",
     "NoCapacity",
     "Outcome",
     "PROTECTED_SKILLS",

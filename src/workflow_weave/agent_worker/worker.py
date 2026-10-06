@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -15,7 +16,7 @@ from openhands.sdk.agent import ACPAgent
 from openhands.sdk.conversation.response_utils import get_agent_final_response
 
 from .config import WorkerSettings
-from .model import NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
+from .model import NeedsSetup, NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
 from .sandbox import Sandbox, stage_skills
 from .subscriptions import Lease
 from .staging import StagingError, StagingPlan, central_skills_version, read_repo_skills
@@ -79,6 +80,8 @@ class AgentWorker:
 
         store = self.settings.subscriptions
         agent = profile.agent_provider
+        if problem := self._needs_setup(request, product, agent):
+            return NeedsSetup(problem)
         lease = store.lease(request.product, agent)
         if lease is None:
             return NoCapacity(request.product, agent, store.associated(request.product, agent))
@@ -87,6 +90,32 @@ class AgentWorker:
         except BaseException:
             store.release(lease)
             raise
+
+    def _needs_setup(self, request: RunRequest, product: Any, agent: str) -> str | None:
+        """The pre-checks: what a human must set up before this run can start, or None.
+
+        Checked in order, from the Sandbox host alone (no sandbox, no lease):
+        the Product has a Subscription for the agent; every Repo has a
+        `CONTEXT.md` on its Base branch.
+        """
+        if not self.settings.subscriptions.associated(request.product, agent):
+            return (
+                f"Product {request.product!r} has no Subscription associated for agent {agent!r}: "
+                f"associate one in the Subscription store"
+            )
+        missing = []
+        for target in request.repos:
+            source = product.repos[target.name].source
+            if _missing_on_branch(source, target.base_branch, "CONTEXT.md"):
+                missing.append(target.name)
+        if missing:
+            names = ", ".join(repr(m) for m in missing)
+            branches = ", ".join(sorted({t.base_branch for t in request.repos if t.name in missing}))
+            return (
+                f"Repo {names} has no CONTEXT.md on its Base branch ({branches}): "
+                f"onboard it (e.g. setup-matt-pocock-skills) before running agents on it"
+            )
+        return None
 
     def _launch(self, request: RunRequest, lease: Lease) -> Started:
         run_id = _new_run_id()
@@ -262,6 +291,19 @@ class AgentWorker:
     def _note(self, rec: RunRecord, line: str) -> None:
         with open(self.settings.runs_dir / rec.run_id / "run.log", "a") as f:
             f.write(f"{_now()} {line}\n")
+
+
+def _missing_on_branch(source: str, branch: str, path: str) -> bool:
+    """True when a readable Repo's branch has no file at `path`.
+
+    A Repo or branch that cannot be read at all is left for the run itself to
+    report (as an infra-failure), not refused here.
+    """
+    if subprocess.run(
+        ["git", "-C", source, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}"], capture_output=True
+    ).returncode != 0:
+        return False
+    return subprocess.run(["git", "-C", source, "cat-file", "-e", f"{branch}:{path}"], capture_output=True).returncode != 0
 
 
 def _settle(probe: Any, timeout: float = 10.0) -> list[str]:

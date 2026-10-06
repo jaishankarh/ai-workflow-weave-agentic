@@ -113,7 +113,7 @@ def make_worker(
     tmp_path: Path, runs_dir: Path, onboarded_repo: Path, probe_profile: AgentProfile
 ) -> Callable[..., AgentWorker]:
     """Build a worker. `products` names Products that each have the onboarded Repo
-    (`product_yaml`, if given, replaces PRODUCT's config); `subscriptions` is the
+    (`product_yaml`, if given, replaces the first Product's config); `subscriptions` is the
     Subscription store (default: one roomy Subscription for PRODUCT)."""
     default_store = tmp_path / "subscriptions.yaml"
     default_store.write_text(
@@ -124,7 +124,7 @@ def make_worker(
 
     def product_config(name: str, product_yaml: str | None):
         product_file = tmp_path / f"product-{name}.yaml"
-        if product_yaml is not None and name == PRODUCT:
+        if product_yaml is not None:
             product_file.write_text(product_yaml)
         else:
             product_file.write_text(f"product: {name}\nrepos:\n  app:\n    source: {onboarded_repo}\n")
@@ -139,7 +139,9 @@ def make_worker(
     ) -> AgentWorker:
         settings = WorkerSettings(
             runs_dir=runs_dir,
-            products={name: product_config(name, product_yaml) for name in products},
+            products={
+                name: product_config(name, product_yaml if i == 0 else None) for i, name in enumerate(products)
+            },
             agent_profiles={"probe": probe_profile},
             subscriptions=subscriptions or load_subscription_store(default_store),
             sandbox_nofile_limit=_nofile_limit(),
