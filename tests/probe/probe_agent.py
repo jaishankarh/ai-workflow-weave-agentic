@@ -146,6 +146,59 @@ def tree_digest(root: Path) -> str:
     return h.hexdigest()
 
 
+_TRACKER_DOC_IN_PROMPT = re.compile(r"issue tracker is described in `([^`]+)`")
+
+
+def report_local_tickets(ctx: dict[str, Any]) -> Any:
+    """The tracker as an upstream skill finds it: the tracker description the prompt names,
+    the tickets it points at, and which read-only originals the probe managed to change."""
+    m = _TRACKER_DOC_IN_PROMPT.search(ctx.get("prompt", ""))
+    if not m:
+        return {"tracker": None}
+    doc = Path(m.group(1)).read_text()
+    heading = doc.splitlines()[0]
+    tracker = heading.split(":", 1)[1].strip().lower().replace(" ", "-")
+    tickets_dir = Path(re.search(r"Tickets live in `([^`]+)`", doc).group(1))
+    originals_dir = Path(re.search(r"originals are in `([^`]+)`", doc).group(1))
+    tickets = [{"kind": "spec", "path": str(tickets_dir / "spec.md"), "body": (tickets_dir / "spec.md").read_text()}]
+    for f in sorted((tickets_dir / "issues").glob("*.md")):
+        tickets.append({"kind": "task", "path": str(f), "body": f.read_text()})
+    originals = sorted(str(p) for p in originals_dir.rglob("*") if p.is_file())
+    return {"tracker": tracker, "tickets": tickets, "originals": originals,
+            "originals_changed": try_to_change(originals_dir)}
+
+
+def try_to_change(folder: Path) -> list[str]:
+    """Try to write, chmod, delete and add files in a folder; what succeeded."""
+    changed = []
+    for p in sorted(folder.rglob("*")):
+        if not p.is_file():
+            continue
+        attempts = [
+            ("write", lambda: p.open("a").write("tampered\n")),
+            ("chmod", lambda: os.chmod(p, 0o666)),
+            ("rename", lambda: os.rename(p, str(p) + ".moved")),
+            ("delete", lambda: p.unlink()),
+        ]
+        for what, attempt in attempts:
+            try:
+                attempt()
+                changed.append(f"{what} {p}")
+            except OSError:
+                pass
+    try:
+        (folder / "new.md").write_text("x")
+        changed.append(f"create {folder / 'new.md'}")
+    except OSError:
+        pass
+    return changed
+
+
+def report_actions(ctx: dict[str, Any]) -> Any:
+    """Results of the actions the script asked for (done before the report)."""
+    return ctx.get("actions", [])
+
+
 REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "earlier_run_markers": report_earlier_run,
     "env_names": report_env_names,
@@ -156,6 +209,8 @@ REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "user_skills": report_user_skills,
     "skills_loaded": report_skills_loaded,
     "working_copies": report_working_copies,
+    "local_tickets": report_local_tickets,
+    "actions": report_actions,
 }
 
 

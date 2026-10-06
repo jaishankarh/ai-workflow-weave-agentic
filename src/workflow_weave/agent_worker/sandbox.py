@@ -47,7 +47,10 @@ class Sandbox:
         env: dict[str, str],
         nofile_limit: int | None,
         start_timeout: float,
+        mounts: list[tuple[str, str]] = (),
+        extra_hosts: list[str] = (),
     ) -> None:
+        """`mounts` are (host path, sandbox path) pairs, mounted read-only."""
         self.run_id = run_id
         self._api_key = secrets.token_urlsafe(24)
         port = _free_port()
@@ -61,6 +64,10 @@ class Sandbox:
         ]
         if nofile_limit:
             cmd += ["--ulimit", f"nofile={nofile_limit}:{nofile_limit}"]
+        for host_path, sandbox_path in mounts:
+            cmd += ["--mount", f"type=bind,source={host_path},target={sandbox_path},readonly"]
+        for h in extra_hosts:
+            cmd += ["--add-host", h]
         for k, v in env.items():
             cmd += ["-e", f"{k}={v}"]
         cmd += [image, "--host", "0.0.0.0", "--port", "8000"]

@@ -18,6 +18,7 @@ from .config import WorkerSettings
 from .model import NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
 from .sandbox import Sandbox, stage_skills
 from .subscriptions import Lease
+from . import local_tickets
 from .staging import StagingError, StagingPlan, central_skills_version, read_repo_skills
 from .staging import plan as plan_skills
 from workflow_weave.central_skills import CentralSkills
@@ -157,6 +158,9 @@ class AgentWorker:
         final: tuple[RunState, Outcome | None, str | None]
         try:
             staging = self._plan_skills(run, product)
+            originals = local_tickets.write_originals(
+                run.request.inputs, self.settings.runs_dir / rec.run_id / "tickets"
+            )
             sandbox = Sandbox(
                 image=profile.image,
                 run_id=rec.run_id,
@@ -165,7 +169,10 @@ class AgentWorker:
                 env={"ACP_PROMPT_MAX_RETRIES": "0", **run.lease.env},
                 nofile_limit=self.settings.sandbox_nofile_limit,
                 start_timeout=self.settings.sandbox_start_timeout,
+                # Read-only, so the agent cannot change the originals (ADR 0009).
+                mounts=[(str(originals.resolve()), local_tickets.ORIGINALS_DIR)],
             )
+            sandbox.sh(local_tickets.MAKE_TRACKER, cwd="/")
             for target in run.request.repos:
                 sandbox.put_repo(
                     product.repos[target.name].source, target.name, target.base_branch, target.integration_branch
@@ -226,6 +233,10 @@ class AgentWorker:
             try:
                 if conversation is not None:
                     leftovers = _settle(sandbox.processes)
+            except Exception:
+                pass
+            try:
+                rec.tickets_done = local_tickets.done_tickets(sandbox.sh(local_tickets.READ_STATUSES, cwd="/"))
             except Exception:
                 pass
             sandbox.destroy()
@@ -307,6 +318,7 @@ def _prompt(request: RunRequest) -> str:
     return (
         f"Run the `{request.skill}` skill.\n\n"
         f"Repos: {repos}\n\n"
+        f"{local_tickets.prompt_pointer()}\n\n"
         f"## Spec\n\n{request.inputs.spec}\n\n## Tasks\n\n{tasks}\n\n"
         f"When you have finished, end your last reply with the line `{DONE_MARK}`. "
         f"If you cannot complete the skill, end it with `{GAVE_UP_MARK}: <why>` instead.\n"
