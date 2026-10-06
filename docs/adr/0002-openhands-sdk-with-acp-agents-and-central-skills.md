@@ -13,7 +13,7 @@ Skills and `coding-standards.md` live in one central skills repo (one `coding-st
 
 ## Consequences
 
-- Outcomes are `succeeded`, `infra-failure` (retried once), `agent-gave-up`, and `quota-exhausted`. On `quota-exhausted` the Task stalls in `ready-for-agent` with a comment and retries after the subscription window resets; no automatic fallback to another Agent profile.
+- Outcomes are `succeeded`, `infra-failure` (retried once), `agent-gave-up`, `quota-exhausted`, and `needs-setup` (added in the Spec 1 grilling, #20). `needs-setup` means the run cannot do useful work until a human fixes its setup: the Repo is not onboarded (no `CONTEXT.md`, or a selected Coding standards file is missing), or the Agent profile's credential is rejected. It is never retried; the item goes to needs-human with a comment naming the problem and the error. An unreachable skills repo stays `infra-failure`. On `quota-exhausted` the Task stalls in `ready-for-agent` with a comment and retries after the subscription window resets; no automatic fallback to another Agent profile.
 - Review prefers a different Agent profile than the one that implemented the Task, but may use the same one when no other is configured; the review result then says so.
 - Running subscription agents unattended inside the sandbox is unproven and must be shown by a spike before build.
 - Each run records the skills-repo version it used.
