@@ -23,6 +23,7 @@ Add a new report item by adding a function to ``REPORTERS``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -78,11 +79,24 @@ def report_cwd(ctx: dict[str, Any]) -> Any:
     return ctx.get("cwd")
 
 
+def report_env_fingerprints(ctx: dict[str, Any]) -> Any:
+    """SHA-256 of the env vars the script names in ``fingerprint_env`` (so values never reach the log)."""
+    names = ctx["script"].get("fingerprint_env") or []
+    return {n: hashlib.sha256(os.environ[n].encode()).hexdigest() for n in names if n in os.environ}
+
+
+def report_prompt_has_secrets_block(ctx: dict[str, Any]) -> Any:
+    """Whether OpenHands sent conversation secrets (its <CUSTOM_SECRETS> block) with the prompt."""
+    return "<CUSTOM_SECRETS>" in ctx.get("prompt", "")
+
+
 REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "earlier_run_markers": report_earlier_run,
     "env_names": report_env_names,
     "repos": report_repos,
     "cwd": report_cwd,
+    "env_fingerprints": report_env_fingerprints,
+    "prompt_has_secrets_block": report_prompt_has_secrets_block,
 }
 
 
@@ -152,7 +166,7 @@ class ProbeAgent:
     async def prompt(self, session_id: str, prompt: list[Any], **kwargs: Any) -> PromptResponse:
         text = "\n".join(getattr(b, "text", "") or "" for b in prompt)
         script = parse_script(text)
-        report = build_report({"cwd": self._cwd, "script": script})
+        report = build_report({"cwd": self._cwd, "script": script, "prompt": text})
         leave_markers()
         await self._send(
             session_id,

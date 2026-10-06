@@ -56,14 +56,24 @@ class RunState(str, enum.Enum):
 class Started:
     """`start` accepted the run; it is now running in the background.
 
-    Later tickets add the other `start` answers (no-capacity, needs-setup)
-    as sibling result types.
+    `subscription` is the name of the Subscription leased for it (never its credential).
     """
 
     run_id: str
+    subscription: str
 
 
-StartResult = Started
+@dataclass(frozen=True)
+class NoCapacity:
+    """`start` refused the run: every Subscription its Product may lease for
+    the agent is at its cap. Not an outcome; the caller may queue the run."""
+
+    product: str
+    agent: str
+    subscriptions: list[str]
+
+
+StartResult = Started | NoCapacity
 
 
 @dataclass(frozen=True)
@@ -93,6 +103,7 @@ class RunRecord:
     run_id: str
     product: str
     agent_profile: str
+    subscription: str  # the leased Subscription's name, never its credential
     skill: str
     repos: list[dict]
     state: RunState

@@ -10,12 +10,26 @@ throwaway Docker sandbox through the OpenHands SDK (`ACPAgent` against the
 agent-server in the sandbox):
 
 ```python
-worker = AgentWorker(WorkerSettings(runs_dir=..., products=..., agent_profiles=...))
+worker = AgentWorker(WorkerSettings(runs_dir=..., products=..., agent_profiles=..., subscriptions=...))
 started = worker.start(RunRequest(product=..., agent_profile=..., repos=[RepoTarget(...)],
                                   skill="implement-spec", inputs=RunInputs(spec=..., tasks=[...])))
 worker.status(started.run_id)   # running | cancelled | ended with one Outcome + reason
 worker.cancel(started.run_id)   # closes the agent's conversation, removes the sandbox
 ```
+
+`start` leases a Subscription for the run's Product and the Agent profile's
+agent from the Subscription store (ADR 0010): the first associated
+Subscription below its cap, in the Product's fallback order. It returns
+`Started(run_id, subscription)`, or `NoCapacity(product, agent, subscriptions)`
+when every associated Subscription is full (not an outcome; queue and retry).
+The lease is released however the run ends, cancel included. The credential
+goes only into the sandbox environment; results and run records carry the
+Subscription's name. The store is one YAML file on the Sandbox host
+(`subscription_store.location` in `weave.yaml`; format in
+`config/subscriptions.example.yaml`), loaded with
+`load_configured_subscription_store` and passed as `WorkerSettings.subscriptions`.
+Lease counts live in that store object, so share one store among all workers
+on a host.
 
 Each run's `record.json` and conversation `events.jsonl` are kept under
 `runs_dir/<run id>/`, outside the sandbox.
