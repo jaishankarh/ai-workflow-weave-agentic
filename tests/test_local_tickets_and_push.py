@@ -79,3 +79,17 @@ def test_the_probe_can_push_to_the_runs_integration_branch(worker, onboarded_rep
     assert push["ok"], push
     # The commit reached the Repo itself, on the Integration branch.
     assert branch_tip(onboarded_repo, "story-1") == push["commit"]
+
+
+def test_pushing_to_any_other_branch_including_the_base_branch_is_refused(worker, onboarded_repo):
+    main_before = branch_tip(onboarded_repo, "main")
+
+    final, _, report = run(worker, {"end": "succeed", "push": ["main", "other-story"]})
+
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+    pushes = {a["branch"]: a for a in report["actions"] if a["action"] == "push"}
+    assert not pushes["main"]["ok"], pushes["main"]
+    assert not pushes["other-story"]["ok"], pushes["other-story"]
+    assert "refused" in pushes["main"]["output"]
+    assert branch_tip(onboarded_repo, "main") == main_before
+    assert branch_tip(onboarded_repo, "other-story") is None
