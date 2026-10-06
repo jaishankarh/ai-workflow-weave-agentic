@@ -60,7 +60,7 @@ Evidence, captured by an agent from the running software, that one Acceptance cr
 _Avoid:_ "logs" alone, "test results" as proof, "spec item" (say Acceptance criterion).
 
 ## Not provable here
-A mark on an Acceptance criterion saying no agent can capture its Proof, so a human checks it at review instead. Set only in the Grilling session, never by an agent, and only for a fixed list of reasons: the Repo has no Run recipe; it needs iOS; it is mobile UI while Environments cannot run an Android emulator; or it depends on an outside system that has no test account or sandbox. The criterion is still tested.
+A mark on an Acceptance criterion saying no agent can capture its Proof, so a human checks it at review instead. Set only in the Grilling session, never by an agent, and only for a fixed list of reasons: the Repo has no Run recipe; it needs iOS; or it depends on an outside system that has no test account or sandbox. The criterion is still tested.
 
 ## Run recipe
 A file committed in a Repo that says how to bring that Repo's software up in an **Environment**: what to build, which other Repos it depends on, which services it needs, what data to seed, which secrets it uses, and how to tell it is ready. Changes with the code, in the same PR. A Repo without a Run recipe cannot be run by agents: its Acceptance criteria are **Not provable here**.
