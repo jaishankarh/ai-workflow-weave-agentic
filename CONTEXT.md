@@ -145,6 +145,10 @@ _Avoid:_ "console", "control panel" (both suggest it can change things).
 A named pairing of an agent (e.g. Cursor, Claude Code, or a model-agnostic loop) and a model, used for an agent run. A Product sets a default Agent profile per workflow node; a Task may override it.
 _Avoid:_ "agent" alone when the model matters too.
 
+## Agent toolset
+The skills and MCP servers staged into one agent run. Skills come from the central skills repo plus the Repo's own; MCP servers come from a Product-wide catalog. A database MCP server only ever connects to that run's own Environment, wired from the services its Run recipes bring up, and is enabled only when a Run recipe brings up that database; never to a shared or production database.
+_Avoid:_ "plugins", "tools" alone (both also name an agent's built-in abilities).
+
 ## Run bookkeeping
 What the Dispatcher remembers about work in flight: agent run IDs, infrastructure retry counts, deploy batches. Never consulted to decide a State; anything that decides one, such as Review rounds, is kept on the Tracker instead.
 _Avoid:_ "workflow state" for this.
