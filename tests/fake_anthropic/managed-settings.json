@@ -1,0 +1,6 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8765",
+    "ANTHROPIC_API_KEY": "sk-ant-fake-api-for-tests"
+  }
+}

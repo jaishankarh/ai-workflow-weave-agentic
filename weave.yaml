@@ -1,0 +1,8 @@
+# AI Workflow Weave configuration.
+central_skills:
+  # Where the Central skills live, relative to this file (may move to its own repo later).
+  location: skills
+subscription_store:
+  # The Subscription store's config file (ADR 0010). It holds agent credentials, so it lives
+  # on the Sandbox host outside any repo. Format: config/subscriptions.example.yaml.
+  location: ~/.config/weave/subscriptions.yaml

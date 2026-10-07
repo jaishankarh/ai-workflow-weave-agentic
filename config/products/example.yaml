@@ -1,0 +1,15 @@
+# One Product's configuration (read by workflow_weave.agent_worker.load_product_config).
+# (Its Subscription associations live in the Subscription store, not here: ADR 0010.)
+product: ahdismoi
+repos:
+  ahdismoi:
+    source: /srv/repos/ahdismoi   # where the sandbox clones the Repo from
+    # Central skills for which this Repo's own .claude/skills/<name> is used instead.
+    # Never a protected skill (the fix skill, the review skill, the test rules).
+    skill_overrides: []
+    # Coding standards: central (default; the Product's file in the Central skills at
+    # products/<product>/coding-standards.md), central+repo, or repo.
+    coding_standards: central
+    # The Repo's own rules files (files or folders), read from its Base branch.
+    # Required for central+repo and repo, e.g. [CLAUDE.md, .claude/rules].
+    # rules_files: []

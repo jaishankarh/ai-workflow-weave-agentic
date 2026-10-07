@@ -1,0 +1,273 @@
+# AI Workflow Weave
+
+Developer workflow as an executable graph. See `CONTEXT.md` for the vocabulary
+and `docs/adr/` for decisions.
+
+## Agent worker (Spec 1)
+
+`workflow_weave.agent_worker.AgentWorker` runs an Agent profile in a fresh,
+throwaway Docker sandbox through the OpenHands SDK (`ACPAgent` against the
+agent-server in the sandbox):
+
+```python
+worker = AgentWorker(WorkerSettings(runs_dir=..., products=..., agent_profiles=..., subscriptions=...))
+started = worker.start(RunRequest(product=..., agent_profile=..., repos=[RepoTarget(...)],
+                                  skill="implement-spec", inputs=RunInputs(spec=..., tasks=[...])))
+worker.status(started.run_id)   # running | cancelled | ended with one Outcome + reason
+worker.cancel(started.run_id)   # closes the agent's conversation, removes the sandbox
+```
+
+`start` leases a Subscription for the run's Product and the Agent profile's
+agent from the Subscription store (ADR 0010): the first associated
+Subscription below its cap, in the Product's fallback order. It returns
+`Started(run_id, subscription)`, or `NoCapacity(product, agent, subscriptions)`
+when every associated Subscription is full (not an outcome; queue and retry),
+or `NeedsSetup(reason)` (outcome `needs-setup`) when a pre-check fails, without
+taking a lease or starting a sandbox. The pre-checks, in order: the Product has a
+Subscription associated for the agent; every Repo has a `CONTEXT.md` on its Base
+branch; every selected Coding standards file exists. The lease is released however the run ends, cancel included. The credential
+goes only into the sandbox environment; results and run records carry the
+Subscription's name. The store is one YAML file on the Sandbox host
+(`subscription_store.location` in `weave.yaml`; format in
+`config/subscriptions.example.yaml`), loaded with
+`load_configured_subscription_store` and passed as `WorkerSettings.subscriptions`.
+Lease counts live in that store object, so share one store among all workers
+on a host.
+
+### Outcomes
+
+A run that ends on its own has exactly one outcome; every outcome but
+`succeeded` has a reason naming the problem and carrying the underlying error.
+Agent errors are classified from the agent's own `errorKind`, never OpenHands'
+codes; the table is `AgentProfile.error_kinds` (default: claude-agent-acp's).
+
+| How the run ended | Outcome |
+|---|---|
+| A line of the agent's final reply is `RUN-OUTCOME: done` (the last marker line counts) | `succeeded` |
+| Agent finished with `RUN-OUTCOME: gave-up: <why>` or no marker, or OpenHands stopped it as stuck with no error | `agent-gave-up` |
+| Agent error `errorKind` `authentication_failed`, or ACP code -32000 (claude-agent-acp's "Authentication required", e.g. for a rejected Claude Code token) | `needs-setup` |
+| Agent error `errorKind` `rate_limit` / `billing_error` | `quota-exhausted` |
+| Any other agent error, a sandbox that fails to start or dies mid-run, unreachable Central skills | `infra-failure` |
+
+`ACP_PROMPT_MAX_RETRIES=0` is set in every sandbox, so a rejected credential
+surfaces in seconds; infrastructure retries are the caller's. When the error
+itself is bare (claude-agent-acp's `[-32000] Authentication required`), the
+reason also quotes what the agent said in the failed turn (e.g. Claude Code's
+`API Error: 401 OAuth access token is invalid.`).
+
+However a run ends, its lease is released, its record saved and its push token
+revoked; a teardown step that fails (closing the conversation, removing the
+sandbox) is noted in the run's `run.log` and does not stop the others.
+
+Each run's `record.json` and conversation `events.jsonl` are kept under
+`runs_dir/<run id>/`, outside the sandbox.
+
+### Skill staging
+
+Each run stages the requested skill and every skill it calls into the agent's
+user-level skills folder (`~/.claude/skills/`) in the sandbox, never into a
+working copy (`WorkerSettings.central_skills_location`). A skill "calls"
+another when a line of its `SKILL.md` mentions the Skill tool and names it in
+backticks or double quotes (see `agent_worker/staging.py`). A Repo's
+`skill_overrides` in the Product config leaves that central skill unstaged so
+the Repo's own `.claude/skills/<name>` loads instead; overrides of
+`PROTECTED_SKILLS` are refused on load. Clashes and override disagreements go
+to `run.log` and the record's `skill_clashes`; the record's `central_skills`
+holds the Central skills version and upstream commit.
+
+### Coding standards and the always-on file
+
+Each Repo's `coding_standards` in the Product config is `central` (default),
+`central+repo` or `repo`; except under `central` it must name `rules_files`
+(paths in the Repo, files or folders), or loading the config fails. The
+Product's own file lives in the Central skills at
+`<central_skills.location>/products/<Product>/coding-standards.md` (here
+`skills/products/<Product>/coding-standards.md`). A Repo's rules files are read
+with git from its **Base branch** on the Sandbox host, never from the working
+branch or the agent's working copy. A selected file that is missing refuses the
+run as `needs-setup` naming it, before any sandbox starts.
+
+The resolved files are copied to `~/.claude/weave/coding-standards/` in the
+sandbox and an always-on file is staged as the user-level `~/.claude/CLAUDE.md`,
+pointing at each Repo's `CONTEXT.md` in its working copy and at those copies.
+Nothing goes into a working copy, so the Repo's own `CLAUDE.md` loads as committed.
+The record keeps `always_on_file` and, per Repo, where each standard was read
+from (`coding_standards`). See `agent_worker/standards.py`.
+
+The pilot Product is `config/products/sri-aurobindo-works-chat.yaml`: the chat
+repo on `central+repo` (its `CLAUDE.md` and `.claude/rules`), Ahdismoi on
+`central`, both on Base branch `main`; its standards are
+`skills/products/sri-aurobindo-works-chat/coding-standards.md`. Set each Repo's
+`source` to its clone on your Sandbox host.
+
+**A central skill wins over a Repo's own skill of the same name.** Claude Code
+documents "personal over project": `~/.claude/skills/<name>` beats the project's
+`.claude/skills/<name>`. But a sandbox session starts in `/workspace`, with each
+Repo below it, so to Claude Code a Repo's skills are *nested* skills
+(`<repo>:<name>`), and a nested skill stays available beside the user-level one
+with a note telling the agent to prefer it for files under that Repo (observed
+with Claude Code 2.1.287). So for every clash the worker also turns the nested
+skill off in the agent's user-level settings (`skillOverrides: {"<repo>:<name>":
+"off"}` in `~/.claude/settings.json`): Claude Code no longer lists it and refuses
+it by name. The working copy is untouched. With a Skill override nothing is
+staged or turned off, and the Repo's own skill loads.
+
+### Claude Code Agent profile
+
+`claude_code_profile(image=...)` is the Agent profile for Claude Code on a
+subscription token (agent provider `claude-code`). Its Subscriptions carry
+`CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, valid one year) as their
+credential env:
+
+```yaml
+subscriptions:
+  claude-main:
+    agent: claude-code
+    cap: 2
+    env: {CLAUDE_CODE_OAUTH_TOKEN: sk-ant-oat01-...}
+```
+
+`ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` would win over the token, so they
+never reach the sandbox, even if a Subscription names them (noted in `run.log`);
+the sandbox gets no environment from the Sandbox host. Claude Code runs through
+claude-agent-acp in `bypassPermissions` mode, which it allows as root because the
+image sets `IS_SANDBOX=1`, and OpenHands approves any permission request that is
+still asked, so a run never waits for input. A rejected token ends the run as
+`needs-setup` within seconds.
+
+### Run inputs and outputs (ADR 0009)
+
+**Local tickets.** The spec and each Task are written on the Sandbox host under
+`runs_dir/<run id>/tickets/` and bind-mounted **read-only** into the sandbox at
+`/weave/tickets/` (the kernel refuses writes, even as root). Beside them is
+`/weave/tickets/issue-tracker.md`, a local-files tracker description modelled
+on upstream `setup-matt-pocock-skills/issue-tracker-local.md`. The run's prompt
+tells the agent to use it wherever a skill refers to
+`docs/agents/issue-tracker.md`, so upstream skills run unforked and nothing is
+written into a working copy. The agent works on a writable copy at
+`/weave/tracker/` (`spec.md`, `issues/NN-<slug>.md`, each with a `Status:`
+line); "closing" a ticket sets `Status: done`. When the run ends, before the
+sandbox is removed, the worker reads those lines back into `tickets_done`
+(`spec`, `01`, `02`, ... in Task order) on the record and the final status. See
+`agent_worker/local_tickets.py`.
+
+**Push gateway.** The sandbox's only git credential is a random per-run token in
+the URL of its only remote, `origin` = `http://weave-git:<port>/<token>/<repo>.git`
+(`weave-git` maps to the Docker host). The worker runs a small smart-HTTP git
+server (`agent_worker/push_gateway.py`, `git http-backend`) on the Docker
+bridge gateway. Per run it keeps a bare mirror of each Repo whose
+`pre-receive` hook accepts only `refs/heads/<Integration branch>` (no deletes,
+tags or other branches, the Base branch included), and before accepting it
+pushes the commit onward to the Repo's `source` (the Sandbox host's clone) and
+from there to the Code host, both with the Sandbox host's own git credentials
+(the sandbox never holds them). A push is either refused or lands on the Code
+host's Integration branch; the token is revoked and the mirrors deleted when the
+run ends.
+
+**The Code host remote.** A Repo's `push_remote` (Product config) names the
+remote of its `source` clone that leads to the Code host; by default `origin`,
+when the clone has one. Before the pre-checks, and again when the run starts,
+the worker fetches the Base branch from it, so `CONTEXT.md`, the rules files and
+the Repo's own skills are read from, and the working copy starts at, the Code
+host's Base branch (the clone's checked-out files are not touched). A clone with
+no Code host remote (a local-only Repo, as in the tests) is used as it stands,
+and pushes stop at it; `run.log` says which applies to each Repo. A configured
+`push_remote` that the clone lacks refuses the run as `needs-setup`.
+`WorkerSettings.push_gateway` lets several workers share one gateway (default:
+each worker starts its own).
+
+**No Tracker or Code host token.** Variables such as `GH_TOKEN`,
+`GITHUB_TOKEN` and `GITLAB_TOKEN` are dropped from the sandbox environment even
+if a Subscription's `env` names one (noted in `run.log`); the sandbox has no
+git credential helper and no `gh`/`glab` config, so an issue, comment, label or
+PR write has nothing to authenticate with.
+
+**For the real Code host (GitHub).** The design holds as is: the gateway is the
+only party with a GitHub credential, and the agent never sees it. Production
+needs: a Repo `source` that is a clone of the GitHub repo (its `origin`, or the
+remote named by `push_remote`), and a Sandbox host credential that can push to
+it (a deploy key or fine-grained token with `contents: write` only, used by the
+hook's onward push from that clone); ideally a GitHub ruleset restricting
+that credential to the Integration branch pattern as a second line of defence;
+and, for larger Repos, a persistent mirror per Repo instead of a fresh clone
+per run. The gateway must listen only where sandboxes can reach it (the bridge
+gateway, not `0.0.0.0`).
+
+### Images
+
+- `sandbox/Dockerfile`: the base sandbox image (agent-server, git, Python).
+  Its base image is the build ARG `BASE_IMAGE` (default `ubuntu:24.04`).
+- `sandbox/claude-code/Dockerfile`: the Claude Code Agent profile's image, on
+  top of the sandbox image (build ARG `SANDBOX_IMAGE`). It pins Node.js
+  22.22.0, the Claude Code CLI (`@anthropic-ai/claude-code` 2.1.287) and its ACP
+  adapter (`@agentclientprotocol/claude-agent-acp` 0.86.0) as build ARGs, and
+  points the adapter at that CLI (`CLAUDE_CODE_EXECUTABLE`). Node comes from the
+  npm registry's `node-linux-<arch>` packages, checked against pinned integrity
+  hashes, so the image builds from PyPI and npm alone. Upgrading a CLI is a
+  deliberate change: bump the ARG and the expected version in
+  `tests/test_claude_code_profile.py`.
+- `tests/probe/Dockerfile`: the probe Agent profile used by the tests, built
+  on top of the sandbox image (build ARG `SANDBOX_IMAGE`). The tests also build
+  it on the Claude Code image, so the probe sees what Claude Code would.
+- `tests/fake_anthropic/Dockerfile` (tests only): the Claude Code image with
+  Claude Code pointed at a scripted fake Messages API inside the sandbox, so the
+  real CLI runs at Seam A without a token.
+
+The test suite builds both itself (as `weave/sandbox:test` and
+`weave/probe-agent:test`). To build by hand:
+
+```sh
+docker build -t weave/sandbox:dev sandbox/
+docker build --build-arg SANDBOX_IMAGE=weave/sandbox:dev -t weave/probe-agent:dev tests/probe/
+docker build --build-arg SANDBOX_IMAGE=weave/sandbox:dev -t weave/claude-code:dev sandbox/claude-code/
+```
+
+### Running the tests
+
+The tests start real Docker sandboxes, so Docker must be running.
+
+On a normal machine:
+
+```sh
+uv sync
+uv run pytest
+```
+
+Environment knobs for the test harness:
+
+| Variable | Effect |
+|---|---|
+| `WEAVE_TEST_BASE_IMAGE` | Base image for the sandbox image (default `ubuntu:24.04`) |
+| `WEAVE_TEST_BUILD_NETWORK` | Passed to `docker build --network` |
+| `WEAVE_TEST_SKIP_BUILD=1` | Reuse the already built test images |
+| `WEAVE_TEST_IMAGE_TAG` | Tag for the test images (default `test`); use one per worktree |
+| `WEAVE_TEST_SANDBOX_NOFILE` | Sandbox open-files limit (default 65536; `0` = Docker's default) |
+| `WEAVE_CLAUDE_CODE_TOKEN` | A real `claude setup-token` token; enables the real-token Claude Code check (skipped without it) |
+
+On a host with no image registry and a low open-files cap (such as the cloud
+build host used for Spec 1), build from a local base image and lower the limit:
+
+```sh
+WEAVE_TEST_BASE_IMAGE=weave/ubuntu-base:noble WEAVE_TEST_BUILD_NETWORK=host \
+WEAVE_TEST_SANDBOX_NOFILE=20000 uv run pytest
+```
+
+The image build needs PyPI and the npm registry. One test,
+`test_an_invalid_token_is_needs_setup_within_seconds`, runs the real Claude Code
+CLI in a sandbox against `api.anthropic.com` with a made-up token, so sandboxes
+need to reach it; no real token is used. Every other Claude Code test runs the
+real CLI against the scripted fake API, or the probe in the Claude Code image.
+
+#### Checking Claude Code with a real token (outside CI)
+
+CI never holds a Claude Code token. To check the profile end to end on your own
+Subscription (one short conversation's worth of quota), create a token with
+`claude setup-token` and run:
+
+```sh
+WEAVE_CLAUDE_CODE_TOKEN=sk-ant-oat01-... uv run pytest tests/test_claude_code_profile.py -k real_token
+```
+
+It starts the real Claude Code profile with a central skill and a Repo skill of
+the same name, and checks that the run succeeds unattended (a shell command runs
+without a prompt) and that the agent loads the central skill, not the Repo's.

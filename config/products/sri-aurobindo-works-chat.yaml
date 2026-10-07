@@ -1,0 +1,18 @@
+# The pilot Product (spec #20, ticket #44). Read by workflow_weave.agent_worker.load_product_config.
+# Its Subscriptions are named only in the Subscription store (ADR 0010), never here: no credentials.
+product: sri-aurobindo-works-chat
+repos:
+  # The chat repo: https://github.com/jaishankarh/sri-aurobindo-works-chat
+  sri-aurobindo-works-chat:
+    source: /srv/repos/sri-aurobindo-works-chat   # its clone on the Sandbox host; change to where yours is
+    base_branch: main                             # GitHub default branch (checked 2026-10-07)
+    skill_overrides: []                           # central skills win, including over its own fullstack-dev
+    # Its CLAUDE.md and .claude/rules/ already hold rich standards; the Product's file adds to them.
+    coding_standards: central+repo
+    rules_files: [CLAUDE.md, .claude/rules]
+  # Ahdismoi: https://github.com/jaishankarh/Ahdismoi
+  ahdismoi:
+    source: /srv/repos/Ahdismoi                   # its clone on the Sandbox host; change to where yours is
+    base_branch: main                             # GitHub default branch (checked 2026-10-07)
+    skill_overrides: []
+    coding_standards: central

@@ -1,0 +1,20 @@
+# The Subscription store (ADR 0010), read by workflow_weave.agent_worker.load_subscription_store.
+# Copy to the path set as `subscription_store.location` in weave.yaml; never commit real credentials.
+subscriptions:
+  claude-main:                     # the Subscription's name (what run records show)
+    agent: claude-code             # the agent provider it is an account for
+    cap: 2                         # runs at once, shared by every Product that uses it
+    env:                           # its credential, passed only as sandbox environment
+      CLAUDE_CODE_OAUTH_TOKEN: sk-ant-oat01-REPLACE-ME
+  claude-spare:
+    agent: claude-code
+    cap: 1
+    env:
+      CLAUDE_CODE_OAUTH_TOKEN: sk-ant-oat01-REPLACE-ME
+products:
+  # Each Product's Subscriptions per agent, in fallback order. The only authority on
+  # which Product may lease which Subscription.
+  ahdismoi:
+    claude-code: [claude-main, claude-spare]
+  sri-aurobindo-works-chat:        # the pilot Product (#44)
+    claude-code: [claude-main, claude-spare]
