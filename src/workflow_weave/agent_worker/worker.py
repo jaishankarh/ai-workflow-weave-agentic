@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import shlex
 import subprocess
 import threading
 import time
@@ -22,6 +23,9 @@ from .model import NeedsSetup, NoCapacity, Outcome, RunRecord, RunRequest, RunSt
 from .outcomes import (
     DONE_MARK, GAVE_UP_MARK, classify_error, classify_final_reply, last_error_detail, with_agent_words,
 )
+from .environment import (
+    RECIPE_PATH, Environment, EnvironmentBringUpError, LogsNotSaved, RecipeError, parse_recipe,
+)
 from .sandbox import WORKDIR, Sandbox, SandboxError, require_runtime, stage_skills, stage_user_files
 from . import standards
 from .subscriptions import Lease
@@ -34,6 +38,8 @@ from workflow_weave.central_skills import CentralSkills
 T = TypeVar("T")
 
 TERMINAL = {"finished", "error", "stuck"}
+# Under a run's folder, beside its event log: <repo>/<service>.log for each Environment service.
+ENVIRONMENT_LOGS_DIR = "environment"
 # How often a running run checks that its sandbox is still alive.
 SANDBOX_CHECK_INTERVAL = 5.0
 
@@ -217,16 +223,27 @@ class AgentWorker:
         sandbox: Sandbox | None = None
         conversation = None
         remotes: RunRemotes | None = None
+        environments: list[Environment] = []
         leftovers: list[str] | None = None
         final: tuple[RunState, Outcome | None, str | None] = (
             RunState.ENDED, Outcome.INFRA_FAILURE, "the run stopped before it could report how it ended",
         )
         try:
-            if self.settings.sandbox_runtime:
-                # Before anything is prepared or started: a host without the runtime is an infra-failure.
-                require_runtime(self.settings.sandbox_runtime)
             code_hosts = _code_host_remotes(run.request, product)
             refs = _base_refs(run.request, product, code_hosts, strict=True)
+            # Only a run with a touched Repo that has a Run recipe gets an Environment, and so a
+            # sandbox on sysbox; every other run stays on the default runtime, unchanged.
+            with_recipe = [t.name for t in run.request.repos if _has_recipe(product.repos[t.name].source, refs[t.name])]
+            runtime = None
+            if with_recipe:
+                runtime = self.settings.sandbox_runtime
+                if not runtime:
+                    raise SandboxError(
+                        f"Repo {with_recipe[0]!r} has a Run recipe ({RECIPE_PATH}) but this worker has no "
+                        f"sandbox_runtime set, so it cannot give the run an Environment"
+                    )
+                # Before anything is prepared or started: a host without the runtime is an infra-failure.
+                require_runtime(runtime)
             for t in run.request.repos:
                 source = product.repos[t.name].source
                 if remote := code_hosts[t.name]:
@@ -265,7 +282,7 @@ class AgentWorker:
                 # Read-only, so the agent cannot change the originals (ADR 0009).
                 mounts=[(str(originals.resolve()), local_tickets.ORIGINALS_DIR)],
                 extra_hosts=[f"{GATEWAY_HOST}:host-gateway"],
-                runtime=self.settings.sandbox_runtime,
+                runtime=runtime,
             )
             sandbox.sh(local_tickets.MAKE_TRACKER, cwd="/")
             for target in run.request.repos:
@@ -281,6 +298,15 @@ class AgentWorker:
             if run.cancel_requested.is_set():
                 raise _Cancelled
 
+            # The Environment is up and ready before any agent starts (and so before any
+            # Subscription use); a failure here ends the run with its reason.
+            for name in with_recipe:
+                environment = Environment(sandbox, name, now=_now)
+                environments.append(environment)
+                self._bring_up(rec, environment, environments)
+                if run.cancel_requested.is_set():
+                    raise _Cancelled
+
             agent = ACPAgent(acp_command=profile.acp_command, acp_session_mode=profile.acp_session_mode)
             log = _EventLog(rec.event_log)
             conversation = Conversation(
@@ -295,6 +321,8 @@ class AgentWorker:
             final = (RunState.ENDED, *_classify(status, conversation, profile.error_kinds))
         except _Cancelled:
             final = (RunState.CANCELLED, None, "cancelled")
+        except EnvironmentBringUpError as e:
+            final = (RunState.ENDED, e.outcome, e.reason[:2000])
         except SandboxError as e:
             final = (RunState.ENDED, Outcome.INFRA_FAILURE, f"sandbox failure: {e}"[:2000])
         except Exception as e:  # anything else that broke the run's infrastructure
@@ -303,7 +331,7 @@ class AgentWorker:
             # Every end path releases the lease, saves the record and finishes the run,
             # however teardown goes (a teardown failure is noted in run.log).
             try:
-                leftovers = self._stop(conversation, sandbox, rec)
+                leftovers = self._stop(conversation, sandbox, rec, environments)
                 if remotes is not None:
                     gateway_remotes = remotes
                     self._best_effort(rec, "revoking the run's push token",
@@ -349,10 +377,33 @@ class AgentWorker:
                     raise SandboxError(f"{how} mid-run: {sandbox.last_logs(500)}")
                 next_check = time.monotonic() + SANDBOX_CHECK_INTERVAL
 
-    def _stop(self, conversation: Any, sandbox: Sandbox | None, rec: RunRecord) -> list[str] | None:
+    def _bring_up(self, rec: RunRecord, environment: Environment, environments: list[Environment]) -> None:
+        """Read the Repo's Run recipe from its working copy in the sandbox and bring it up. The run
+        record lists every service that became ready, even when a later one did not."""
+        code, text = environment.sandbox.run(f"cat {shlex.quote(RECIPE_PATH)}", cwd=f"{WORKDIR}/{environment.repo}")
+        if code != 0:
+            raise EnvironmentBringUpError(
+                f"Repo {environment.repo!r}: its Run recipe {RECIPE_PATH} is not in the working copy "
+                f"(it was on the Base branch): {text.strip()[-300:]}"
+            )
+        try:
+            recipe = parse_recipe(environment.repo, text)
+        except RecipeError as e:
+            raise EnvironmentBringUpError(str(e)) from e
+        try:
+            environment.bring_up(recipe)
+        finally:
+            # Whatever became ready is on the record, even when a later service did not.
+            rec.environment_services = [r.as_record() for e in environments for r in e.ready]
+            self._save(rec)
+
+    def _stop(
+        self, conversation: Any, sandbox: Sandbox | None, rec: RunRecord, environments: list[Environment] = ()
+    ) -> list[str] | None:
         """Close the conversation (never just interrupt it, #13), then remove the sandbox.
 
-        Best effort: each step that fails is noted in run.log, and the next one still runs.
+        Best effort: each step that fails is noted in run.log, and the next one still runs. The
+        Environment's service logs are saved outside the sandbox first, while they still exist.
         """
         leftovers: list[str] | None = None
         if conversation is not None:
@@ -361,6 +412,8 @@ class AgentWorker:
             # Deletes the conversation on the agent-server.
             self._best_effort(rec, "closing the agent's conversation", conversation.close)
         if sandbox is not None:
+            if environments:
+                rec.environment_logs = self._save_environment_logs(rec, environments)
             if conversation is not None:
                 leftovers = self._best_effort(rec, "listing processes left after close",
                                               lambda: _settle(sandbox.processes))
@@ -370,6 +423,21 @@ class AgentWorker:
             )
             self._best_effort(rec, "removing the sandbox", sandbox.destroy)
         return leftovers
+
+    def _save_environment_logs(self, rec: RunRecord, environments: list[Environment]) -> dict[str, str]:
+        """Save every Environment service's log under the run's folder, beside the event log."""
+        destination = self._run_dir(rec.run_id) / ENVIRONMENT_LOGS_DIR
+        saved: dict[str, str] = {}
+        for environment in environments:
+            try:
+                saved.update(environment.save_logs(destination))
+            except LogsNotSaved as e:
+                saved.update(e.saved)  # the ones that could be read are still on the record
+                self._note(rec, f"teardown: saving the service logs failed: {e}")
+            except Exception as e:
+                self._note(rec, f"teardown: saving the service logs of Repo {environment.repo!r} failed: "
+                                f"{type(e).__name__}: {e}")
+        return saved
 
     def _best_effort(self, rec: RunRecord, what: str, step: Callable[[], T]) -> T | None:
         """Run one teardown step; if it fails, note it with its error and carry on."""
@@ -428,6 +496,14 @@ def _missing_on_branch(source: str, ref: str, path: str) -> bool:
     if not git.has_commit(source, ref):
         return False
     return subprocess.run(["git", "-C", source, "cat-file", "-e", f"{ref}:{path}"], capture_output=True).returncode != 0
+
+
+def _has_recipe(source: str, ref: str) -> bool:
+    """True when a readable Repo has a Run recipe on its Base branch (read at `ref`).
+
+    A Repo or branch that cannot be read is not taken to have one: the run itself reports it.
+    """
+    return git.has_commit(source, ref) and not _missing_on_branch(source, ref, RECIPE_PATH)
 
 
 def _code_host_remotes(request: RunRequest, product: ProductConfig) -> dict[str, str | None]:

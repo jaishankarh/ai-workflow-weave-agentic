@@ -399,6 +399,69 @@ def report_docker_socket_mounts(ctx: dict[str, Any]) -> Any:
     return [line for line in Path("/proc/self/mountinfo").read_text().splitlines() if "docker.sock" in line]
 
 
+def _service_container(repo: str, service: str) -> str | None:
+    """The id of the Environment container for `service` of `repo` (a Compose project named for the Repo)."""
+    out = _docker(
+        "ps", "-q",
+        "--filter", f"label=com.docker.compose.project={repo}",
+        "--filter", f"label=com.docker.compose.service={service}",
+    ).stdout.split()
+    return out[0] if out else None
+
+
+def report_environment(ctx: dict[str, Any]) -> Any:
+    """What the Environment looks like from inside the sandbox (script keys, all optional):
+
+    ``reach``: ``[{"repo", "service", "port", "path"}]``  HTTP GET the service through its address
+        on the Environment network (resolved to the container's IP on that network, as the sandbox's
+        own resolver does not know ``<service>.<repo>``), with no retry.
+    ``exec_in_service``: ``[{"repo", "service", "command"}]``  run a shell command in a service's container.
+    ``list_containers``: true  every container in the sandbox's own engine, running or not.
+    """
+    from urllib.request import urlopen
+
+    script = ctx["script"]
+    out: dict[str, Any] = {}
+    if reaches := script.get("reach"):
+        results = []
+        for spec in reaches:
+            item: dict[str, Any] = dict(spec)
+            try:
+                cid = _service_container(spec["repo"], spec["service"])
+                if cid is None:
+                    item["error"] = "no such service container"
+                else:
+                    net = '(index .NetworkSettings.Networks "weave-env")'
+                    ip = _docker("inspect", "-f", "{{" + net + ".IPAddress}}", cid).stdout.strip()
+                    aliases = _docker("inspect", "-f", "{{" + net + ".Aliases}}", cid).stdout
+                    item["alias_ok"] = f"{spec['service']}.{spec['repo']}" in aliases
+                    with urlopen(f"http://{ip}:{spec['port']}{spec.get('path', '/')}", timeout=5) as r:
+                        item["status"], item["body"] = r.status, r.read().decode()[:500]
+            except Exception as e:
+                item["error"] = f"{type(e).__name__}: {e}"
+            results.append(item)
+        out["reach"] = results
+    if execs := script.get("exec_in_service"):
+        results = []
+        for spec in execs:
+            item = dict(spec)
+            try:
+                r = _docker(
+                    "compose", "-p", spec["repo"], "-f", f"/workspace/{spec['repo']}/.weave/compose.yaml",
+                    "-f", f"/weave/env/{spec['repo']}.override.yaml", "exec", "-T", spec["service"],
+                    "sh", "-c", spec["command"],
+                )
+                item["exit"], item["output"] = r.returncode, (r.stdout + r.stderr)[-1000:]
+            except Exception as e:
+                item["error"] = f"{type(e).__name__}: {e}"
+            results.append(item)
+        out["exec"] = results
+    if script.get("list_containers"):
+        r = _docker("ps", "-a", "--format", "{{.Names}}")
+        out["containers"] = r.stdout.split() if r.returncode == 0 else {"error": r.stderr.strip()[-300:]}
+    return out or None
+
+
 REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "earlier_run_markers": report_earlier_run,
     "env_names": report_env_names,
@@ -417,6 +480,7 @@ REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "always_on": report_always_on,
     "container": report_container,
     "docker_socket_mounts": report_docker_socket_mounts,
+    "environment": report_environment,
 }
 
 

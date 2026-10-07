@@ -47,7 +47,8 @@ codes; the table is `AgentProfile.error_kinds` (default: claude-agent-acp's).
 | Agent finished with `RUN-OUTCOME: gave-up: <why>` or no marker, or OpenHands stopped it as stuck with no error | `agent-gave-up` |
 | Agent error `errorKind` `authentication_failed`, or ACP code -32000 (claude-agent-acp's "Authentication required", e.g. for a rejected Claude Code token) | `needs-setup` |
 | Agent error `errorKind` `rate_limit` / `billing_error` | `quota-exhausted` |
-| Any other agent error, a sandbox that fails to start or dies mid-run, unreachable Central skills, a Sandbox host without the `sandbox_runtime` the worker is set to (checked before anything starts) | `infra-failure` |
+| Any other agent error, a sandbox that fails to start or dies mid-run, unreachable Central skills, a Sandbox host without the `sandbox_runtime` a run needs for its Environment (checked before anything starts) | `infra-failure` |
+| A Repo's Run recipe that cannot be read, or whose services do not start or become ready (before any agent starts; see "Environments") | `needs-setup` |
 
 `ACP_PROMPT_MAX_RETRIES=0` is set in every sandbox, so a rejected credential
 surfaces in seconds; infrastructure retries are the caller's. When the error
@@ -195,14 +196,53 @@ gateway, not `0.0.0.0`).
 
 ### Sandboxes on sysbox
 
-`WorkerSettings.sandbox_runtime="sysbox-runc"` starts every sandbox with `docker run --runtime
-sysbox-runc` (never `--privileged`, never the host's Docker socket; ADR 0004), and the image's
-entrypoint then starts a Docker engine inside it (`WEAVE_START_DOCKERD=1`), so software runs in
-containers inside the sandbox. The default, `None`, keeps the host's default runtime and starts no
+Only a run with a touched Repo that has a Run recipe (below) gets a sandbox on sysbox: such a
+sandbox starts with `docker run --runtime <WorkerSettings.sandbox_runtime>` (default
+`sysbox-runc`; never `--privileged`, never the host's Docker socket; ADR 0004), and the image's
+entrypoint then starts a Docker engine inside it (`WEAVE_START_DOCKERD=1`), so the Repo's software
+runs in containers inside the sandbox. Every other run stays on the host's default runtime with no
 engine. A Sandbox host whose Docker does not list the runtime fails the run as `infra-failure`
-naming it, before a sandbox is started. Teardown waits until the sandbox is gone from the Sandbox
-host (polling `docker inspect`, up to 60 s) before the run is reported ended; if it is not gone,
-that is noted in `run.log`. Tests that need sysbox are skipped on a host without it.
+naming it, before a sandbox is started; so does a worker whose `sandbox_runtime` is `None` when a
+run needs an Environment. Teardown waits until the sandbox is gone from the Sandbox host (polling
+`docker inspect`, up to 60 s) before the run is reported ended; if it is not gone, that is noted in
+`run.log`. Tests that need sysbox are skipped on a host without it.
+
+### Environments: a Repo's Run recipe
+
+A Repo's Run recipe is one committed compose file, `.weave/compose.yaml`, kept apart from any
+developer `docker-compose.yml` (which is never used: the worker names the recipe with an explicit
+`-f`). The workflow's own fields sit in one top-level `x-weave:` block, which Compose ignores, so the
+file also runs by hand with `docker compose -f .weave/compose.yaml up`:
+
+```yaml
+services:
+  web:
+    image: python:3.12-slim
+    command: python -m http.server 8000
+x-weave:
+  readiness:            # a check for every service, run inside its container; exit 0 = ready
+    web:
+      command: python -c "import urllib.request as u; u.urlopen('http://localhost:8000')"
+      timeout: 60       # seconds after start (default 60)
+      interval: 1       # seconds between attempts (default 1)
+```
+
+`command` is a string (run with `sh -c`) or a list (run as is). A recipe may have no services. The
+other `x-weave` fields of Spec 2 (dependencies, seed, secrets, databases, MCP servers) are not read
+yet.
+
+Between staging the agent's files and starting the agent, the worker brings each such Repo's
+recipe up inside the sandbox as its own Compose project (`-p <repo>`, from the Repo's working
+copy), on a shared network `weave-env` where each service has the alias `<service>.<repo>`, and
+waits until every service has passed its readiness check. A service that does not start or does not
+become ready in time ends the run before any agent starts (no Subscription use), as `needs-setup`
+with a reason naming the Repo, the service and its last log lines. (Telling that apart from a
+Story's branches breaking the Environment, `environment-broken`, is #51.) The containers have open
+internet access, and go with the sandbox: nothing is shared between runs.
+
+The run record lists `environment_services` (Repo, service, address, `ready_at`,
+`seconds_to_ready`) and `environment_logs` (each service's log, saved to
+`<runs_dir>/<run id>/environment/<repo>/<service>.log` before the sandbox is removed).
 
 ### Images
 

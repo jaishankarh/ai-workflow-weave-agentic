@@ -144,6 +144,12 @@ class RunRecord:
     # (where each file was read from).
     always_on_file: str | None = None
     coding_standards: dict[str, list[str]] | None = None
+    # The Environment (#49): each service started from a Repo's Run recipe with when it passed its
+    # readiness check ({"repo", "service", "address", "ready_at", "seconds_to_ready"}), and where
+    # each service's log was saved outside the sandbox ({"<repo>/<service>": path}). None: the
+    # run had no Environment.
+    environment_services: list[dict] | None = None
+    environment_logs: dict[str, str] | None = None
 
     def status(self) -> RunStatus:
         return RunStatus(self.run_id, self.state, self.outcome, self.reason, self.tickets_done)

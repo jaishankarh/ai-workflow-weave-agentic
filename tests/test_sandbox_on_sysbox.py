@@ -15,7 +15,10 @@ import json
 import subprocess
 
 import pytest
-from conftest import needs_sysbox, probe_reports, probe_request, sandboxes_of, wait_for, wait_until_ended
+from conftest import (
+    PRODUCT, needs_sysbox, probe_reports, probe_request, product_yaml_for, repo_with_recipe, sandboxes_of, wait_for,
+    wait_until_ended,
+)
 
 from workflow_weave.agent_worker import AgentProfile, Outcome, RunState, Started
 from workflow_weave.agent_worker.sandbox import (
@@ -26,6 +29,11 @@ from workflow_weave.agent_worker.sandbox import (
     require_runtime,
     sandbox_run_command,
 )
+
+
+def recipe_product(tmp_path):
+    """A Product whose only Repo has a Run recipe: a run on it needs an Environment, so sysbox."""
+    return product_yaml_for({"app": repo_with_recipe(tmp_path / "recipe-repos")}, PRODUCT)
 
 
 def _proc(returncode=0, stdout="", stderr=""):
@@ -158,8 +166,8 @@ def test_a_docker_that_cannot_answer_is_not_taken_for_a_removed_sandbox():
 
 
 @needs_sysbox
-def test_the_probe_can_start_and_stop_a_container_inside_its_sandbox_and_report_the_result(make_worker):
-    worker = make_worker(sandbox_runtime=SYSBOX_RUNTIME)
+def test_the_probe_can_start_and_stop_a_container_inside_its_sandbox_and_report_the_result(make_worker, tmp_path):
+    worker = make_worker(product_yaml=recipe_product(tmp_path))
     try:
         started = worker.start(probe_request({"end": "succeed", "run_container": {"image": "alpine:3.20"}}))
         final = wait_until_ended(worker, started.run_id, timeout=300)
@@ -173,8 +181,8 @@ def test_the_probe_can_start_and_stop_a_container_inside_its_sandbox_and_report_
 
 
 @needs_sysbox
-def test_no_host_docker_socket_is_present_in_the_sandbox_and_the_sandbox_is_not_privileged(make_worker):
-    worker = make_worker(sandbox_runtime=SYSBOX_RUNTIME)
+def test_no_host_docker_socket_is_present_in_the_sandbox_and_the_sandbox_is_not_privileged(make_worker, tmp_path):
+    worker = make_worker(product_yaml=recipe_product(tmp_path))
     try:
         started = worker.start(probe_request({"end": "succeed", "run_container": {"image": "alpine:3.20"}}))
         final = wait_until_ended(worker, started.run_id, timeout=300)
@@ -187,8 +195,8 @@ def test_no_host_docker_socket_is_present_in_the_sandbox_and_the_sandbox_is_not_
 
 
 @needs_sysbox
-def test_the_sandbox_is_not_privileged_and_runs_on_sysbox(make_worker):
-    worker = make_worker(sandbox_runtime=SYSBOX_RUNTIME)
+def test_the_sandbox_is_not_privileged_and_runs_on_sysbox(make_worker, tmp_path):
+    worker = make_worker(product_yaml=recipe_product(tmp_path))
     try:
         started = worker.start(probe_request({"end": "hang"}))
         wait_for(lambda: sandboxes_of(started.run_id), 60, 0.5, "the sandbox to exist")
@@ -204,8 +212,8 @@ def test_the_sandbox_is_not_privileged_and_runs_on_sysbox(make_worker):
 
 
 @needs_sysbox
-def test_teardown_leaves_no_sandbox_on_the_sandbox_host_when_it_is_reported(make_worker):
-    worker = make_worker(sandbox_runtime=SYSBOX_RUNTIME)
+def test_teardown_leaves_no_sandbox_on_the_sandbox_host_when_it_is_reported(make_worker, tmp_path):
+    worker = make_worker(product_yaml=recipe_product(tmp_path))
     try:
         script = {"end": "succeed", "run_container": {"image": "alpine:3.20", "leave_running": True}}
         started = worker.start(probe_request(script))
@@ -217,10 +225,14 @@ def test_teardown_leaves_no_sandbox_on_the_sandbox_host_when_it_is_reported(make
 
 @needs_sysbox
 def test_runs_that_need_no_environment_are_unaffected_on_a_sysbox_host(make_worker):
-    worker = make_worker()  # no sandbox_runtime
+    worker = make_worker()  # the worker is set to sysbox, but this Repo has no Run recipe
     try:
-        started = worker.start(probe_request({"end": "succeed"}))
-        final = wait_until_ended(worker, started.run_id, timeout=180)
+        started = worker.start(probe_request({"end": "hang"}))
+        wait_for(lambda: sandboxes_of(started.run_id), 60, 0.5, "the sandbox to exist")
+        (cid,) = sandboxes_of(started.run_id)
+        inspect = json.loads(subprocess.run(["docker", "inspect", cid], capture_output=True, text=True, check=True).stdout)[0]
+        worker.cancel(started.run_id)
     finally:
         worker.shutdown()
-    assert final.outcome is Outcome.SUCCEEDED
+    assert inspect["HostConfig"]["Runtime"] != "sysbox-runc"
+    assert not any(e.startswith("WEAVE_START_DOCKERD") for e in inspect["Config"]["Env"])

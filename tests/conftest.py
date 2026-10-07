@@ -20,6 +20,7 @@ from typing import Callable
 import pytest
 
 from workflow_weave import central_skills
+from workflow_weave.agent_worker.sandbox import SYSBOX_RUNTIME
 from workflow_weave.agent_worker import (
     AgentProfile,
     AgentWorker,
@@ -174,6 +175,28 @@ def commit_on_code_host(code_host: Path, files: dict[str, str], branch: str = "m
     return _git("-C", str(work), "rev-parse", "HEAD")
 
 
+def repo_with_recipe(
+    root: Path, name: str = "app", recipe: str = "x-weave: {}\n", extra_files: dict[str, str] | None = None
+) -> Path:
+    """An onboarded Repo that has a Run recipe (`.weave/compose.yaml`) committed on main. The
+    default recipe has no services: an Environment with nothing to start, but a run that needs
+    one (so a sandbox on sysbox)."""
+    return make_repo(
+        root / name,
+        {
+            "CONTEXT.md": f"# Context: {name}\n\nGlossary only.\n",
+            ".weave/compose.yaml": recipe,
+            **(extra_files or {}),
+        },
+    )
+
+
+def product_yaml_for(repos: dict[str, Path], product: str = "probe-product") -> str:
+    """Product config text for `make_worker(product_yaml=...)` with these Repos (name -> clone)."""
+    lines = "".join(f"  {name}:\n    source: {path}\n" for name, path in repos.items())
+    return f"product: {product}\nrepos:\n{lines}"
+
+
 @pytest.fixture
 def onboarded_repo(tmp_path: Path) -> Path:
     """A small Repo that has been onboarded (it has a CONTEXT.md)."""
@@ -233,7 +256,7 @@ def make_worker(
         product_yaml: str | None = None,
         central_skills_location: Path | None = None,
         agent_profiles: dict[str, AgentProfile] | None = None,
-        sandbox_runtime: str | None = None,
+        sandbox_runtime: str | None = SYSBOX_RUNTIME,
     ) -> AgentWorker:
         if central_skills_location is None:
             # This repo's Central skills, plus a coding-standards file for each test Product.

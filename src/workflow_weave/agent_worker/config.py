@@ -204,6 +204,8 @@ class WorkerSettings:
     # The sandboxes' only git remote (ADR 0009). None: the worker starts its own,
     # listening on the Docker bridge gateway.
     push_gateway: PushGateway | None = None
-    # `docker run --runtime`: "sysbox-runc" gives each sandbox its own Docker engine (ADR 0004);
-    # None (the default) keeps the host's default runtime, as runs that need no Environment do.
-    sandbox_runtime: str | None = None
+    # `docker run --runtime` for a run that needs an Environment, i.e. one with a touched Repo that
+    # has a Run recipe: "sysbox-runc" gives that run's sandbox its own Docker engine (ADR 0004).
+    # Runs with no Run recipe never use it and stay on the host's default runtime. None: this
+    # worker cannot give a run an Environment, so a run that needs one is an infra-failure.
+    sandbox_runtime: str | None = "sysbox-runc"

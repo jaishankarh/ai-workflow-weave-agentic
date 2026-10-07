@@ -211,6 +211,20 @@ class Sandbox:
             raise SandboxError(f"`{command}` failed ({r.exit_code}): {(r.stderr or r.stdout or '').strip()[-1000:]}")
         return r.stdout or ""
 
+    def run(self, command: str, timeout: float = 120, cwd: str = WORKDIR) -> tuple[int, str]:
+        """Run a command in the sandbox; its exit code and output (stdout, then stderr), however it exits."""
+        r = self.workspace.execute_command(command, cwd=cwd, timeout=timeout)
+        return r.exit_code, (r.stdout or "") + (r.stderr or "")
+
+    def put_text(self, path: str, text: str) -> None:
+        """Write a text file inside the sandbox (creating its folder)."""
+        directory = path.rsplit("/", 1)[0] or "/"
+        self.sh(f"mkdir -p {shlex.quote(directory)}", cwd="/")
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "upload"
+            local.write_text(text)
+            self.workspace.file_upload(local, path)
+
     def put_repo(
         self, source: str, name: str, base_branch: str, integration_branch: str, remote_url: str,
         base_ref: str | None = None,
