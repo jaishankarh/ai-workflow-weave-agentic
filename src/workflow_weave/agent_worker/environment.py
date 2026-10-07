@@ -17,7 +17,14 @@ which Compose ignores, so the file also runs with plain `docker compose -f .weav
 
 `command` is a string (run with `sh -c`) or a list (run as is); exit status 0 means ready. A recipe
 may have no services at all. Other `x-weave` fields (dependencies, seed, secrets, databases, MCP
-servers) belong to later tickets of Spec 2 and are ignored here.
+servers) belong to later tickets of Spec 2 and are ignored here, except `secrets`:
+
+    x-weave:
+      secrets: [KORONA_API_KEY]   # Test secrets this Repo's services need, by name only
+
+Each named secret reaches every service of the recipe as an environment variable of that name,
+with the value from the Product's Test secrets; nothing else from the Test secrets does, and none
+reaches the agent's sandbox environment. A recipe never holds a value.
 """
 
 from __future__ import annotations
@@ -26,11 +33,12 @@ import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import yaml
 
 from .model import Outcome
+from .secret_store import SECRET_NAME, redact
 
 # Fixed, and never the developer's `docker-compose.yml`.
 RECIPE_PATH = ".weave/compose.yaml"
@@ -80,6 +88,8 @@ class Recipe:
     repo: str
     services: tuple[str, ...]
     readiness: dict[str, ReadinessCheck]
+    # Names of the Test secrets the recipe needs (never values).
+    secrets: tuple[str, ...] = ()
 
 
 def parse_recipe(repo: str, text: str) -> Recipe:
@@ -114,7 +124,24 @@ def parse_recipe(repo: str, text: str) -> Recipe:
         if service not in checks:
             raise bad(f"has no readiness check for service {service!r} (`{WEAVE_KEY}.readiness.{service}`)")
         readiness[service] = _parse_check(checks[service], service, bad)
-    return Recipe(repo=repo, services=names, readiness=readiness)
+    return Recipe(repo=repo, services=names, readiness=readiness, secrets=_parse_secret_names(block, bad))
+
+
+def _parse_secret_names(block: dict, bad: Callable[[str], RecipeError]) -> tuple[str, ...]:
+    raw = block.get("secrets")
+    if raw is None:
+        return ()
+    where = f"`{WEAVE_KEY}.secrets`"
+    # Names only: a mapping (NAME: value) would put a value in a committed file.
+    if not isinstance(raw, list) or not all(isinstance(n, str) for n in raw):
+        raise bad(f"has {where} that is not a list of secret names (names only, never values)")
+    for name in raw:
+        if not SECRET_NAME.fullmatch(name):
+            raise bad(f"has {where} naming {name!r}, which is not a valid environment variable name")
+    if len(set(raw)) != len(raw):
+        dup = next(n for n in raw if raw.count(n) > 1)
+        raise bad(f"names secret {dup!r} twice in {where}")
+    return tuple(raw)
 
 
 def _parse_check(raw: Any, service: str, bad: Callable[[str], RecipeError]) -> ReadinessCheck:
@@ -143,7 +170,12 @@ def compose_override(repo: str, recipe: Recipe) -> str:
     under standard tooling."""
     doc = {
         "services": {
-            s: {"networks": {NETWORK: {"aliases": [f"{s}.{repo}"]}, "default": {}}} for s in recipe.services
+            s: {
+                "networks": {NETWORK: {"aliases": [f"{s}.{repo}"]}, "default": {}},
+                # Names only: Compose takes each value from the environment of the `up` command.
+                **({"environment": list(recipe.secrets)} if recipe.secrets else {}),
+            }
+            for s in recipe.services
         },
         "networks": {NETWORK: {"external": True, "name": NETWORK}},
     }
@@ -191,9 +223,13 @@ class Environment:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         working_copy: str | None = None,
+        secrets: Mapping[str, str] | None = None,
     ) -> None:
         self.sandbox = sandbox
         self.repo = repo
+        # The Product's Test secrets this Repo's recipe names, name -> value. Held here only to
+        # start its containers and to keep values out of everything that is recorded.
+        self._secrets = dict(secrets or {})
         self._now, self._clock, self._sleep = now, clock, sleep
         self._recipe_file = f"{working_copy or f'/workspace/{repo}'}/{RECIPE_PATH}"
         self._override_file = f"{ENV_DIR}/{repo}.override.yaml"
@@ -203,6 +239,14 @@ class Environment:
 
     def _compose(self, *args: str) -> str:
         return shlex.join(compose_args(self.repo, self._recipe_file, self._override_file) + list(args))
+
+    def _with_secrets(self, command: str, recipe: Recipe) -> str:
+        """`command` run with the recipe's named secrets (and only those) in its environment."""
+        given = " ".join(f"{name}={shlex.quote(self._secrets[name])}" for name in recipe.secrets)
+        return f"{given} {command}" if given else command
+
+    def _redacted(self, text: str) -> str:
+        return redact(text, self._secrets.values())
 
     def bring_up(self, recipe: Recipe) -> list[ServiceReady]:
         """Start the recipe's services and return once every one has passed its readiness check.
@@ -214,15 +258,23 @@ class Environment:
         self.recipe = recipe
         if not recipe.services:
             return self.ready
+        if absent := [n for n in recipe.secrets if n not in self._secrets]:
+            raise EnvironmentBringUpError(
+                f"Repo {self.repo!r}: its Run recipe names Test secret(s) {', '.join(absent)} that this run "
+                f"was not given: add them to the Product's Test secrets"
+            )
         self.sandbox.run(
             f"docker network inspect {NETWORK} >/dev/null 2>&1 || docker network create {NETWORK}", cwd="/"
         )
         self.sandbox.put_text(self._override_file, compose_override(self.repo, recipe))
         started = self._clock()
-        code, out = self.sandbox.run(self._compose("up", "-d", "--build"), timeout=UP_TIMEOUT, cwd="/")
+        code, out = self.sandbox.run(
+            self._with_secrets(self._compose("up", "-d", "--build"), recipe), timeout=UP_TIMEOUT, cwd="/"
+        )
         if code != 0:
             raise EnvironmentBringUpError(
-                f"Repo {self.repo!r}: its Run recipe's services did not start ({RECIPE_PATH}): {_tail(out)}"
+                f"Repo {self.repo!r}: its Run recipe's services did not start ({RECIPE_PATH}): "
+                f"{self._redacted(_tail(out))}"
             )
         for service in recipe.services:
             check = recipe.readiness[service]
@@ -236,7 +288,7 @@ class Environment:
                 if self._clock() >= deadline:
                     raise EnvironmentBringUpError(
                         f"Repo {self.repo!r}: service {service!r} was not ready {check.timeout:.0f}s after start "
-                        f"(its readiness check never passed). Last log lines: {self._last_log_lines(service)}"
+                        f"(its readiness check never passed). Last log lines: {self._redacted(self._last_log_lines(service))}"
                     )
                 self._sleep(check.interval)
             self.ready.append(
@@ -269,7 +321,7 @@ class Environment:
                 continue
             path = destination / self.repo / f"{service}.log"
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(out)
+            path.write_text(self._redacted(out))
             saved[f"{self.repo}/{service}"] = str(path)
         if failed:
             raise LogsNotSaved(f"Repo {self.repo!r}: logs of {', '.join(failed)} could not be saved", saved)

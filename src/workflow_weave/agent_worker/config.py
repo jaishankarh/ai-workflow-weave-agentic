@@ -11,6 +11,7 @@ import yaml
 from .model import Outcome
 from .outcomes import CLAUDE_AGENT_ACP_ERROR_KINDS
 from .push_gateway import PushGateway
+from .secret_store import SecretStore
 from .subscriptions import SubscriptionStore
 
 
@@ -209,3 +210,6 @@ class WorkerSettings:
     # Runs with no Run recipe never use it and stay on the host's default runtime. None: this
     # worker cannot give a run an Environment, so a run that needs one is an infra-failure.
     sandbox_runtime: str | None = "sysbox-runc"
+    # The Products' Test secrets, one file each on the Sandbox host (`test_secrets.location` in
+    # weave.yaml). None: no Test secrets are configured, so a recipe naming a secret needs setup.
+    test_secrets: SecretStore | None = None
