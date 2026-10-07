@@ -25,9 +25,12 @@ from .outcomes import (
 )
 from .environment import (
     FROM_BASE_BRANCH, FROM_TASK_BRANCH, RECIPE_PATH, Environment, EnvironmentBringUpError, LogsNotSaved, Placement,
-    Recipe, RecipeError, parse_recipe, resolve_environment, seed_in_dependency_order,
+    Recipe, RecipeError, environment_manifest, parse_recipe, resolve_environment, seed_in_dependency_order,
 )
-from .sandbox import WORKDIR, Sandbox, SandboxError, require_runtime, stage_skills, stage_user_files
+from .sandbox import (
+    WORKDIR, Sandbox, SandboxError, require_runtime, stage_skills, stage_user_files, stage_weave_env,
+)
+from .weave_env import MANIFEST_PATH as WEAVE_ENV_MANIFEST
 from . import standards
 from .secret_store import SecretsError, redact
 from .subscriptions import Lease
@@ -349,6 +352,7 @@ class AgentWorker:
             stage_skills(sandbox, staging)
             # The always-on file and the resolved Coding standards, at user level (ADR 0002).
             user_dir = stage_user_files(sandbox, lambda d: resolved.tarball(d, WORKDIR))
+            stage_weave_env(sandbox)  # the agent's one command for its Environment (#54)
             rec.always_on_file = f"{user_dir}/{standards.ALWAYS_ON_FILE}"
             rec.coding_standards = {r.repo: [f.origin for f in r.files] for r in resolved.repos}
             if run.cancel_requested.is_set():
@@ -485,6 +489,8 @@ class AgentWorker:
             if run.cancel_requested.is_set():
                 raise _Cancelled
         self._seed(rec, environments)
+        # Tell `weave-env` what the Environment is (#54); written once it is up and seeded.
+        sandbox.put_text(WEAVE_ENV_MANIFEST, json.dumps(environment_manifest([p for p, _ in placed], environments)))
         if run.cancel_requested.is_set():
             raise _Cancelled
 

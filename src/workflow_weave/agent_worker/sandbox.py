@@ -344,6 +344,17 @@ def stage_user_files(sandbox: Sandbox, make_tarball) -> str:
     return user_dir
 
 
+def stage_weave_env(sandbox: Sandbox) -> None:
+    """Install the `weave-env` command in the sandbox (#54), for every run: a run with no
+    Environment then gets its clear message rather than `command not found`. Its manifest, which
+    says what the Environment is, is written once the Environment is up."""
+    from . import weave_env
+
+    source = Path(weave_env.__file__).read_text()
+    sandbox.put_text(weave_env.INSTALL_PATH, "#!/usr/bin/env python3\n" + source)
+    sandbox.sh(f"chmod +x {shlex.quote(weave_env.INSTALL_PATH)}", cwd="/")
+
+
 # Edits the agent's user-level settings (Claude Code's `~/.claude/settings.json`).
 _TURN_OFF = """import json, os, sys
 path = os.path.expanduser("~/.claude/settings.json")

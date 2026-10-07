@@ -56,6 +56,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import yaml
 
+from . import weave_env
 from .model import Outcome
 from .secret_store import SECRET_NAME, redact
 
@@ -335,6 +336,29 @@ class Environment:
         # The last seed that succeeded (None: no seed, or not seeded yet).
         self.seeded: SeedRun | None = None
 
+    def describe(self) -> dict:
+        """This Repo as the in-sandbox `weave-env` command is told about it (#54): its recipe,
+        services, readiness checks, seed and the *names* of its Test secrets, never a value."""
+        if self.recipe is None:
+            raise RuntimeError(f"Repo {self.repo!r}: not brought up, so there is nothing to describe")
+        r = self.recipe
+        return {
+            "repo": self.repo,
+            "recipe_file": self._recipe_file,
+            "override_file": self._override_file,
+            "services": list(r.services),
+            "depends_on": list(r.depends_on),
+            "readiness": {
+                s: {"command": list(c.command), "timeout": c.timeout, "interval": c.interval}
+                for s, c in r.readiness.items()
+            },
+            "secrets": list(r.secrets),
+            "seed": (
+                {"service": r.seed.service, "command": list(r.seed.command), "timeout": r.seed.timeout}
+                if r.seed else None
+            ),
+        }
+
     def _compose(self, *args: str) -> str:
         return shlex.join(compose_args(self.repo, self._recipe_file, self._override_file) + list(args))
 
@@ -540,6 +564,18 @@ def seed_in_dependency_order(environments: Sequence[Environment]) -> list[SeedRu
                 f"Repo {environment.repo!r}: its services are not ready, so no Repo is seeded yet"
             )
     return [run for environment in environments if (run := environment.seed())]
+
+
+def environment_manifest(placements: Sequence["Placement"], environments: Sequence[Environment]) -> dict:
+    """What the in-sandbox `weave-env` command is told about the Environment (#54): each Repo in
+    dependency order (as `environments` is) with where it runs from and `Environment.describe()`.
+    Test secret names only, never values."""
+    by_repo = {p.repo: p for p in placements}
+    entries = []
+    for environment in environments:
+        placement = by_repo[environment.repo]
+        entries.append({**placement.as_record(), "path": placement.path, **environment.describe()})
+    return weave_env.manifest(entries, NETWORK)
 
 
 # ---------------------------------------------------------------- which Repos, in what order, from where

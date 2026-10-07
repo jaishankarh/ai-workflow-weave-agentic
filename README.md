@@ -274,6 +274,29 @@ copy, Task branch or Base branch, its `branch`, and whether the run `touched` it
 `environment_services` (Repo, service, address, `ready_at`, `seconds_to_ready`) and `environment_logs` (each service's log, saved to
 `<runs_dir>/<run id>/environment/<repo>/<service>.log` before the sandbox is removed).
 
+#### The `weave-env` command
+
+The agent manages its Environment only through `weave-env`, installed in every run's sandbox
+(`/usr/local/bin/weave-env`, a standard-library Python program, `weave_env.py`); it needs no Docker
+commands of its own:
+
+- `weave-env status` lists every service of every Repo, its address, its state and whether it is ready.
+- `weave-env logs <repo> [service]` shows the recent output (last 200 lines) of one service, or of all the Repo's.
+- `weave-env rebuild <repo>` rebuilds that Repo's project from its working copy (`up --build`), re-joins
+  the Environment network and waits for readiness again; volumes are kept, so its data is as it was, and
+  nothing is seeded again.
+- `weave-env reset` removes every project with its volumes (`down -v`), brings them up fresh in
+  dependency order and seeds again in that order.
+
+An unknown Repo or service, and a Repo that runs no services of its own, get a plain message naming
+what there is (exit status 1); a run with no Environment gets "This run has no Environment" rather
+than a crash. The worker tells the command what the Environment is by writing a manifest,
+`/weave/env/manifest.json`, once the Environment is up and seeded: each Repo in dependency order with
+its placement, recipe, services, readiness checks, seed and the *names* of its Test secrets. Secret
+values are never in it or in the agent's environment: when `rebuild` or `reset` has to recreate a
+container it reads the values back from the Repo's own containers and hands them on exactly as bring-up
+does (only the secrets the recipe names), and its output is redacted of them.
+
 #### Test secrets
 
 A Product's Test secrets (credentials for test accounts and sandboxes of outside services, never

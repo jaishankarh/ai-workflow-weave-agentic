@@ -472,6 +472,27 @@ def report_environment(ctx: dict[str, Any]) -> Any:
     return out or None
 
 
+def report_weave_env(ctx: dict[str, Any]) -> Any:
+    """Run the agent's `weave-env` command as the script asks (``weave_env``: a list run in order,
+    each an argument list, or ``{"exec": {"repo", "service", "command"}}`` to change a service's
+    data in between) and say what each did: ``[{"args", "exit", "output"}]``. All of this happens
+    before the ``environment`` report looks at the Environment."""
+    results = []
+    for args in ctx["script"].get("weave_env") or []:
+        item: dict[str, Any] = {"args": args}
+        try:
+            if isinstance(args, dict):
+                spec = args["exec"]
+                r = _docker("exec", _service_container(spec["repo"], spec["service"]), "sh", "-c", spec["command"])
+            else:
+                r = subprocess.run(["weave-env", *args], capture_output=True, text=True, timeout=1800)
+            item["exit"], item["output"] = r.returncode, (r.stdout + r.stderr)[-3000:]
+        except Exception as e:
+            item["error"] = f"{type(e).__name__}: {e}"
+        results.append(item)
+    return results or None
+
+
 REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "earlier_run_markers": report_earlier_run,
     "env_names": report_env_names,
@@ -490,6 +511,7 @@ REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "always_on": report_always_on,
     "container": report_container,
     "docker_socket_mounts": report_docker_socket_mounts,
+    "weave_env": report_weave_env,  # before "environment": what that sees is after these commands
     "environment": report_environment,
 }
 
