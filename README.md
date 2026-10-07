@@ -45,12 +45,15 @@ codes; the table is `AgentProfile.error_kinds` (default: claude-agent-acp's).
 |---|---|
 | Agent's last reply ends `RUN-OUTCOME: done` | `succeeded` |
 | Agent finished otherwise, or with `RUN-OUTCOME: gave-up: <why>` | `agent-gave-up` |
-| Agent error `errorKind` `authentication_failed`, or ACP code -32000 | `needs-setup` |
+| Agent error `errorKind` `authentication_failed`, or ACP code -32000 (claude-agent-acp's "Authentication required", e.g. for a rejected Claude Code token) | `needs-setup` |
 | Agent error `errorKind` `rate_limit` / `billing_error` | `quota-exhausted` |
 | Any other agent error, a sandbox that fails to start or dies mid-run, unreachable Central skills | `infra-failure` |
 
 `ACP_PROMPT_MAX_RETRIES=0` is set in every sandbox, so a rejected credential
-surfaces in seconds; infrastructure retries are the caller's.
+surfaces in seconds; infrastructure retries are the caller's. When the error
+itself is bare (claude-agent-acp's `[-32000] Authentication required`), the
+reason also quotes what the agent said in the failed turn (e.g. Claude Code's
+`API Error: 401 OAuth access token is invalid.`).
 
 Each run's `record.json` and conversation `events.jsonl` are kept under
 `runs_dir/<run id>/`, outside the sandbox.
@@ -67,6 +70,41 @@ the Repo's own `.claude/skills/<name>` loads instead; overrides of
 `PROTECTED_SKILLS` are refused on load. Clashes and override disagreements go
 to `run.log` and the record's `skill_clashes`; the record's `central_skills`
 holds the Central skills version and upstream commit.
+
+**A central skill wins over a Repo's own skill of the same name.** Claude Code
+documents "personal over project": `~/.claude/skills/<name>` beats the project's
+`.claude/skills/<name>`. But a sandbox session starts in `/workspace`, with each
+Repo below it, so to Claude Code a Repo's skills are *nested* skills
+(`<repo>:<name>`), and a nested skill stays available beside the user-level one
+with a note telling the agent to prefer it for files under that Repo (observed
+with Claude Code 2.1.287). So for every clash the worker also turns the nested
+skill off in the agent's user-level settings (`skillOverrides: {"<repo>:<name>":
+"off"}` in `~/.claude/settings.json`): Claude Code no longer lists it and refuses
+it by name. The working copy is untouched. With a Skill override nothing is
+staged or turned off, and the Repo's own skill loads.
+
+### Claude Code Agent profile
+
+`claude_code_profile(image=...)` is the Agent profile for Claude Code on a
+subscription token (agent provider `claude-code`). Its Subscriptions carry
+`CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, valid one year) as their
+credential env:
+
+```yaml
+subscriptions:
+  claude-main:
+    agent: claude-code
+    cap: 2
+    env: {CLAUDE_CODE_OAUTH_TOKEN: sk-ant-oat01-...}
+```
+
+`ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` would win over the token, so they
+never reach the sandbox, even if a Subscription names them (noted in `run.log`);
+the sandbox gets no environment from the Sandbox host. Claude Code runs through
+claude-agent-acp in `bypassPermissions` mode, which it allows as root because the
+image sets `IS_SANDBOX=1`, and OpenHands approves any permission request that is
+still asked, so a run never waits for input. A rejected token ends the run as
+`needs-setup` within seconds.
 
 ### Run inputs and outputs (ADR 0009)
 
@@ -117,8 +155,21 @@ gateway, not `0.0.0.0`).
 
 - `sandbox/Dockerfile`: the base sandbox image (agent-server, git, Python).
   Its base image is the build ARG `BASE_IMAGE` (default `ubuntu:24.04`).
+- `sandbox/claude-code/Dockerfile`: the Claude Code Agent profile's image, on
+  top of the sandbox image (build ARG `SANDBOX_IMAGE`). It pins Node.js
+  22.22.0, the Claude Code CLI (`@anthropic-ai/claude-code` 2.1.287) and its ACP
+  adapter (`@agentclientprotocol/claude-agent-acp` 0.86.0) as build ARGs, and
+  points the adapter at that CLI (`CLAUDE_CODE_EXECUTABLE`). Node comes from the
+  npm registry's `node-linux-<arch>` packages, checked against pinned integrity
+  hashes, so the image builds from PyPI and npm alone. Upgrading a CLI is a
+  deliberate change: bump the ARG and the expected version in
+  `tests/test_claude_code_profile.py`.
 - `tests/probe/Dockerfile`: the probe Agent profile used by the tests, built
-  on top of the sandbox image (build ARG `SANDBOX_IMAGE`).
+  on top of the sandbox image (build ARG `SANDBOX_IMAGE`). The tests also build
+  it on the Claude Code image, so the probe sees what Claude Code would.
+- `tests/fake_anthropic/Dockerfile` (tests only): the Claude Code image with
+  Claude Code pointed at a scripted fake Messages API inside the sandbox, so the
+  real CLI runs at Seam A without a token.
 
 The test suite builds both itself (as `weave/sandbox:test` and
 `weave/probe-agent:test`). To build by hand:
@@ -126,6 +177,7 @@ The test suite builds both itself (as `weave/sandbox:test` and
 ```sh
 docker build -t weave/sandbox:dev sandbox/
 docker build --build-arg SANDBOX_IMAGE=weave/sandbox:dev -t weave/probe-agent:dev tests/probe/
+docker build --build-arg SANDBOX_IMAGE=weave/sandbox:dev -t weave/claude-code:dev sandbox/claude-code/
 ```
 
 ### Running the tests
@@ -148,6 +200,7 @@ Environment knobs for the test harness:
 | `WEAVE_TEST_SKIP_BUILD=1` | Reuse the already built test images |
 | `WEAVE_TEST_IMAGE_TAG` | Tag for the test images (default `test`); use one per worktree |
 | `WEAVE_TEST_SANDBOX_NOFILE` | Sandbox open-files limit (default 65536; `0` = Docker's default) |
+| `WEAVE_CLAUDE_CODE_TOKEN` | A real `claude setup-token` token; enables the real-token Claude Code check (skipped without it) |
 
 On a host with no image registry and a low open-files cap (such as the cloud
 build host used for Spec 1), build from a local base image and lower the limit:
@@ -156,3 +209,23 @@ build host used for Spec 1), build from a local base image and lower the limit:
 WEAVE_TEST_BASE_IMAGE=weave/ubuntu-base:noble WEAVE_TEST_BUILD_NETWORK=host \
 WEAVE_TEST_SANDBOX_NOFILE=20000 uv run pytest
 ```
+
+The image build needs PyPI and the npm registry. One test,
+`test_an_invalid_token_is_needs_setup_within_seconds`, runs the real Claude Code
+CLI in a sandbox against `api.anthropic.com` with a made-up token, so sandboxes
+need to reach it; no real token is used. Every other Claude Code test runs the
+real CLI against the scripted fake API, or the probe in the Claude Code image.
+
+#### Checking Claude Code with a real token (outside CI)
+
+CI never holds a Claude Code token. To check the profile end to end on your own
+Subscription (one short conversation's worth of quota), create a token with
+`claude setup-token` and run:
+
+```sh
+WEAVE_CLAUDE_CODE_TOKEN=sk-ant-oat01-... uv run pytest tests/test_claude_code_profile.py -k real_token
+```
+
+It starts the real Claude Code profile with a central skill and a Repo skill of
+the same name, and checks that the run succeeds unattended (a shell command runs
+without a prompt) and that the agent loads the central skill, not the Repo's.

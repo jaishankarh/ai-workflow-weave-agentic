@@ -132,6 +132,15 @@ def report_skills_loaded(ctx: dict[str, Any]) -> Any:
     return loaded
 
 
+def report_skills_turned_off(ctx: dict[str, Any]) -> Any:
+    """Skills turned off in the agent's user-level settings (Claude Code's `skillOverrides`)."""
+    settings = Path.home() / ".claude" / "settings.json"
+    if not settings.is_file():
+        return []
+    overrides = json.loads(settings.read_text()).get("skillOverrides") or {}
+    return sorted(name for name, state in overrides.items() if state == "off")
+
+
 def report_working_copies(ctx: dict[str, Any]) -> Any:
     """Each working copy's full `git status` (ignored and untracked files too) and a
     digest of every file outside `.git`, to compare with the Repo as committed."""
@@ -327,6 +336,7 @@ REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "prompt_has_secrets_block": report_prompt_has_secrets_block,
     "user_skills": report_user_skills,
     "skills_loaded": report_skills_loaded,
+    "skills_turned_off": report_skills_turned_off,
     "working_copies": report_working_copies,
     "prompt_attempts": report_prompt_attempts,
     "local_tickets": report_local_tickets,

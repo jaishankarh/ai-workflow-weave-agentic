@@ -9,7 +9,18 @@ made-up token. Tests that need a real `claude setup-token` are skipped unless
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import json
+import os
 import subprocess
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+from conftest import PRODUCT, make_repo, probe_reports, probe_request, wait_until_ended
+
+from workflow_weave.agent_worker import Outcome, RunInputs, claude_code_profile, load_subscription_store
 
 # The agent CLI versions the image pins (sandbox/claude-code/Dockerfile). Changing
 # them is a deliberate upgrade: update both places.
@@ -44,13 +55,7 @@ def test_agent_cli_versions_are_pinned_in_the_image(claude_code_image):
 
 # --------------------------------------------------------------------------- the profile's sandbox, seen by the probe
 
-import hashlib  # noqa: E402
-from pathlib import Path  # noqa: E402
 
-import pytest  # noqa: E402
-from conftest import PRODUCT, probe_reports, probe_request, wait_until_ended  # noqa: E402
-
-from workflow_weave.agent_worker import Outcome, claude_code_profile, load_subscription_store  # noqa: E402
 
 FAKE_TOKEN = "sk-ant-oat01-not-a-real-token"
 
@@ -130,9 +135,6 @@ def test_an_invalid_token_is_needs_setup_within_seconds(make_worker, real_claude
 
 
 def _event_span(event_log: Path):
-    import json
-    from datetime import datetime
-
     times = [datetime.fromisoformat(json.loads(line)["timestamp"]) for line in event_log.read_text().splitlines()]
     assert times, "empty event log"
     return min(times), max(times)
@@ -149,8 +151,6 @@ def claude_code_on_fake_api(fake_api_claude_code_image):
 
 def agent_said(event_log: Path) -> str:
     """Everything the agent replied in the run, from the saved event log."""
-    import json
-
     said = []
     for line in event_log.read_text().splitlines():
         ev = json.loads(line)
@@ -179,8 +179,6 @@ def test_permissions_are_auto_approved_and_a_run_needs_no_interactive_input(
 
 def clash_fixture(tmp_path: Path, override: bool):
     """Central skills and a Repo that both have a `clash` skill; the run's skill calls it."""
-    from conftest import make_repo
-
     def skill(name: str, body: str) -> str:
         return f"---\nname: {name}\ndescription: the {name} skill\n---\n\n{body}\n"
 
@@ -246,3 +244,60 @@ def test_with_a_skill_override_claude_code_loads_the_repos_own_skill(make_worker
 
     assert final.outcome is Outcome.SUCCEEDED, final.reason
     assert "REPO-CLASH-BODY" in said and "CENTRAL-CLASH-BODY" not in said, said
+
+
+def test_a_shadowed_repo_skill_is_turned_off_at_user_level_and_the_working_copy_is_untouched(
+    make_worker, probe_as_claude_code, tmp_path
+):
+    # The same clash, seen by the probe in the Claude Code sandbox.
+    central, product = clash_fixture(tmp_path, override=False)
+    store = subscription_store(tmp_path, {"CLAUDE_CODE_OAUTH_TOKEN": FAKE_TOKEN})
+    worker = make_worker(subscriptions=store, agent_profiles={"claude-code": probe_as_claude_code},
+                         product_yaml=product, central_skills_location=central)
+    try:
+        started = worker.start(probe_request({"end": "succeed"}, agent_profile="claude-code", skill="work"))
+        final = wait_until_ended(worker, started.run_id)
+        [report] = probe_reports(worker.record(started.run_id).event_log)
+    finally:
+        worker.shutdown()
+
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+    assert report["skills_turned_off"] == ["app:clash"]
+    assert report["user_skills"]["clash"] == "the clash skill"
+    assert report["working_copies"]["app"]["status"] == ""
+
+
+# --------------------------------------------------------------------------- with a real token (outside CI)
+
+
+REAL_TOKEN = os.environ.get("WEAVE_CLAUDE_CODE_TOKEN")
+needs_real_token = pytest.mark.skipif(
+    not REAL_TOKEN, reason="set WEAVE_CLAUDE_CODE_TOKEN to a `claude setup-token` token to check Claude Code for real"
+)
+
+
+@needs_real_token
+def test_with_a_real_token_claude_code_runs_unattended_and_loads_the_central_skill(
+    make_worker, real_claude_code, tmp_path
+):
+    # Uses a little of the Subscription's quota: one short conversation.
+    central, product = clash_fixture(tmp_path, override=False)
+    store = subscription_store(tmp_path, {"CLAUDE_CODE_OAUTH_TOKEN": REAL_TOKEN})
+    worker = make_worker(subscriptions=store, agent_profiles={"claude-code": real_claude_code},
+                         product_yaml=product, central_skills_location=central)
+    request = dataclasses.replace(
+        probe_request({}, agent_profile="claude-code", skill="work"),
+        inputs=RunInputs(spec="A check that Claude Code runs unattended.", tasks=[
+            "Run `echo RAN-$((6*7))` in a shell, and load the `clash` skill with the Skill tool. "
+            "Then reply with the shell's output and the one word in capitals that the skill's body contains."
+        ]),
+    )
+    try:
+        started = worker.start(request)
+        final = wait_until_ended(worker, started.run_id, timeout=600)
+        said = agent_said(worker.record(started.run_id).event_log)
+    finally:
+        worker.shutdown()
+
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+    assert "RAN-42" in said and "CENTRAL-CLASH-BODY" in said and "REPO-CLASH-BODY" not in said, said
