@@ -30,6 +30,12 @@ class RepoConfig:
 
     `base_branch` is the Repo's Base branch (default `main`), for whoever builds a
     run request; a request still names the Base branch it uses for each Repo.
+
+    `push_remote` names the remote of the `source` clone that leads to the Code host
+    (default: `origin`, when the clone has one). Before a run, the Base branch is
+    fetched from it, and a push the run makes to its Integration branch continues
+    from `source` to it with the Sandbox host's own git credentials. A clone with no
+    such remote is used as it stands, and pushes stop at it.
     """
 
     name: str
@@ -38,6 +44,7 @@ class RepoConfig:
     coding_standards: str = "central"
     rules_files: tuple[str, ...] = ()
     base_branch: str = "main"
+    push_remote: str | None = None
 
     @property
     def uses_product_standards(self) -> bool:
@@ -79,6 +86,7 @@ def load_product_config(path: str | Path, protected_skills: frozenset[str] = PRO
         coding_standards: central+repo   # central (default) | central+repo | repo
         rules_files: [CLAUDE.md, .claude/rules]   # required unless central
         base_branch: main          # optional; default main
+        push_remote: origin        # optional; default origin when the clone has one
     ```
     """
     data = yaml.safe_load(Path(path).read_text()) or {}
@@ -113,6 +121,9 @@ def load_product_config(path: str | Path, protected_skills: frozenset[str] = PRO
         base = repo.get("base_branch", "main")
         if not isinstance(base, str) or not base.strip():
             raise ProductConfigError(f"{path}: repo {repo_name!r}: 'base_branch' must be a branch name")
+        push_remote = repo.get("push_remote")
+        if push_remote is not None and (not isinstance(push_remote, str) or not push_remote.strip()):
+            raise ProductConfigError(f"{path}: repo {repo_name!r}: 'push_remote' must be a git remote name")
         repos[repo_name] = RepoConfig(
             name=repo_name,
             source=str(repo["source"]),
@@ -120,6 +131,7 @@ def load_product_config(path: str | Path, protected_skills: frozenset[str] = PRO
             coding_standards=mode,
             rules_files=tuple(r.strip("/") for r in rules),
             base_branch=base,
+            push_remote=push_remote,
         )
     return ProductConfig(name=name, repos=repos)
 

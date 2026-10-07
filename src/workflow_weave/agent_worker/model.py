@@ -95,6 +95,8 @@ class RunStatus:
     state: RunState
     outcome: Outcome | None = None
     reason: str | None = None
+    # Local tickets the agent marked done, once the run has ended (see RunRecord).
+    tickets_done: list[str] | None = None
 
     @property
     def is_running(self) -> bool:
@@ -144,7 +146,7 @@ class RunRecord:
     coding_standards: dict[str, list[str]] | None = None
 
     def status(self) -> RunStatus:
-        return RunStatus(self.run_id, self.state, self.outcome, self.reason)
+        return RunStatus(self.run_id, self.state, self.outcome, self.reason, self.tickets_done)
 
     def to_json(self) -> str:
         d = asdict(self)

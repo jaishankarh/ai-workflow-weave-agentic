@@ -35,7 +35,7 @@ _PROBLEM = {
 _ERROR_KIND = re.compile(r'"errorKind"\s*:\s*"([^"]+)"')
 _CODE = re.compile(r"^\[(-?\d+)\]")
 
-# The agent is asked to end its last reply with one of these lines.
+# The agent is asked to end its last reply with one of these lines (any line of it counts).
 DONE_MARK = "RUN-OUTCOME: done"
 GAVE_UP_MARK = "RUN-OUTCOME: gave-up"
 
@@ -57,12 +57,19 @@ def classify_error(detail: str, error_kinds: Mapping[str, Outcome]) -> tuple[Out
 
 
 def classify_final_reply(reply: str) -> tuple[Outcome, str | None]:
-    """The outcome of a conversation that finished: did the agent report its skill complete?"""
-    lines = [line.strip() for line in reply.strip().splitlines() if line.strip()]
-    last = lines[-1] if lines else ""
+    """The outcome of a conversation that finished: did the agent report its skill complete?
+
+    The marker may be on any line of the final reply (surrounding spaces ignored); if
+    there are several, the last one counts.
+    """
+    marks = [
+        line for line in (raw.strip() for raw in reply.splitlines())
+        if line == DONE_MARK or line.startswith(GAVE_UP_MARK)
+    ]
+    last = marks[-1] if marks else ""
     if last == DONE_MARK:
         return Outcome.SUCCEEDED, None
-    if last.startswith(GAVE_UP_MARK):
+    if last:
         why = last[len(GAVE_UP_MARK):].lstrip(": ").strip()
         return Outcome.AGENT_GAVE_UP, f"agent gave up: {why or 'no reason given'}"
     return Outcome.AGENT_GAVE_UP, "agent gave up: it ended without reporting the skill complete"

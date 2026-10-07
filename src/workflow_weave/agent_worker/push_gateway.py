@@ -9,9 +9,10 @@ For each run the gateway keeps a bare mirror of each Repo (cloned from its
 `source`). The mirror's `pre-receive` hook accepts an update only to
 `refs/heads/<that Repo's Integration branch>` (no deletes, no tags, no other
 branch), and before accepting it pushes the same commit onward to the Repo's
-`source` with the Sandbox host's own git credentials. So a push is either
-refused, or lands on the real remote's Integration branch. The run token stops
-working when the run ends.
+`source` (the Sandbox host's clone) and from there to the Code host (the clone's
+Code host remote, if it has one), with the Sandbox host's own git credentials.
+So a push is either refused, or lands on the Code host's Integration branch. The
+run token stops working when the run ends.
 
 The gateway speaks git's smart HTTP protocol through `git http-backend`. It
 listens on an address sandboxes can reach (the Docker bridge's gateway by
@@ -61,10 +62,20 @@ while read -r old new ref; do
   # Leave git's quarantine so the onward push sees the objects just received.
   if ! env -u GIT_QUARANTINE_PATH -u GIT_DIR git --git-dir="$PWD" push --quiet {upstream} "$new:$ref" >&2; then
     echo "weave: the Repo's remote refused $ref" >&2
+    status=1; continue
+  fi
+{onward}done
+exit $status
+"""
+
+
+# From the Sandbox host's clone on to the Code host, as that clone (outside this mirror's
+# quarantine, so with none of its object-directory settings).
+_ONWARD = """  if ! env -u GIT_QUARANTINE_PATH -u GIT_DIR -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \\
+      git -C {source} push --quiet {remote} "$new:$ref" >&2; then
+    echo "weave: the Code host refused $ref" >&2
     status=1
   fi
-done
-exit $status
 """
 
 
@@ -128,11 +139,11 @@ class PushGateway:
 
     # ------------------------------------------------------------------ runs
 
-    def open_run(self, root: Path, repos: dict[str, tuple[str, str]]) -> RunRemotes:
-        """Mirror each Repo (name -> (source, Integration branch)) under `root` and
-        return the remotes a run's sandbox gets."""
+    def open_run(self, root: Path, repos: dict[str, tuple[str, str, str | None]]) -> RunRemotes:
+        """Mirror each Repo (name -> (source, Integration branch, the source clone's Code
+        host remote or None)) under `root` and return the remotes a run's sandbox gets."""
         root.mkdir(parents=True, exist_ok=True)
-        for name, (source, branch) in repos.items():
+        for name, (source, branch, code_host) in repos.items():
             mirror = root / f"{name}.git"
             r = subprocess.run(["git", "clone", "-q", "--bare", source, str(mirror)], capture_output=True, text=True)
             if r.returncode != 0:
@@ -141,7 +152,10 @@ class PushGateway:
             git("config", "http.receivepack", "true")
             git("config", "receive.denyDeletes", "true")
             hook = mirror / "hooks" / "pre-receive"
-            hook.write_text(_HOOK.format(ref=shlex.quote(f"refs/heads/{branch}"), upstream=shlex.quote(source)))
+            onward = _ONWARD.format(source=shlex.quote(source), remote=shlex.quote(code_host)) if code_host else ""
+            hook.write_text(
+                _HOOK.format(ref=shlex.quote(f"refs/heads/{branch}"), upstream=shlex.quote(source), onward=onward)
+            )
             hook.chmod(0o755)
         token = secrets.token_urlsafe(24)
         with self._lock:

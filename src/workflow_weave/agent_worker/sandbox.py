@@ -80,23 +80,29 @@ class Sandbox:
         self.host = f"http://127.0.0.1:{port}"
         try:
             self._wait_healthy(start_timeout)
-        except Exception:
-            self.destroy()
+        except Exception as e:
+            try:
+                self.destroy()
+            except Exception as gone:
+                raise SandboxError(f"{e}; and the sandbox could not be removed: {gone}") from e
             raise
         self.workspace = RemoteWorkspace(host=self.host, api_key=self._api_key, working_dir=WORKDIR)
 
     def _wait_healthy(self, timeout: float) -> None:
         deadline = time.monotonic() + timeout
+        last_error = "no answer yet"
         while time.monotonic() < deadline:
             try:
                 with urlopen(f"{self.host}/health", timeout=1.0):
                     return
-            except Exception:
-                pass
+            except Exception as e:  # not up yet: keep polling, and keep the error for the reason
+                last_error = f"{type(e).__name__}: {e}"
             if how := self.stopped():
                 raise SandboxError(f"{how} while starting: {self.last_logs()}")
             time.sleep(0.5)
-        raise SandboxError(f"sandbox did not become healthy within {timeout:.0f}s")
+        raise SandboxError(
+            f"sandbox did not become healthy within {timeout:.0f}s (last health check: {last_error})"
+        )
 
     def sh(self, command: str, timeout: float = 120, cwd: str = WORKDIR) -> str:
         r = self.workspace.execute_command(command, cwd=cwd, timeout=timeout)
@@ -104,9 +110,13 @@ class Sandbox:
             raise SandboxError(f"`{command}` failed ({r.exit_code}): {(r.stderr or r.stdout or '').strip()[-1000:]}")
         return r.stdout or ""
 
-    def put_repo(self, source: str, name: str, base_branch: str, integration_branch: str, remote_url: str) -> None:
-        """Clone a Repo from the Sandbox host into the sandbox, check out its Integration
-        branch, and make `remote_url` (the push gateway) its only remote."""
+    def put_repo(
+        self, source: str, name: str, base_branch: str, integration_branch: str, remote_url: str,
+        base_ref: str | None = None,
+    ) -> None:
+        """Clone a Repo from the Sandbox host into the sandbox, start its Integration branch
+        from the Base branch as read at `base_ref` in `source` (default: the local branch),
+        and make `remote_url` (the push gateway) its only remote."""
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp) / f"{name}.bundle"
             r = subprocess.run(["git", "-C", source, "bundle", "create", str(bundle), "--all"], capture_output=True, text=True)
@@ -115,7 +125,9 @@ class Sandbox:
             remote_bundle = f"/tmp/weave-repos/{name}.bundle"
             self.workspace.file_upload(bundle, remote_bundle)
         dest = f"{WORKDIR}/{name}"
-        self.sh(f"git clone -q --branch {base_branch} {remote_bundle} {dest}")
+        self.sh(f"git clone -q {remote_bundle} {dest}")
+        ref = shlex.quote(base_ref or f"refs/heads/{base_branch}")
+        self.sh(f"git fetch -q {remote_bundle} {ref} && git checkout -q -B {base_branch} FETCH_HEAD", cwd=dest)
         self.sh(f"git checkout -q -B {integration_branch}", cwd=dest)
         self.sh(f"git remote set-url origin {remote_url} && rm -f {remote_bundle}", cwd=dest)
 
@@ -149,7 +161,9 @@ class Sandbox:
         return (logs.stdout + logs.stderr).strip()[-chars:]
 
     def destroy(self) -> None:
-        _docker("rm", "-f", self.container_id, timeout=60)
+        r = _docker("rm", "-f", self.container_id, timeout=60)
+        if r.returncode != 0:
+            raise SandboxError(f"cannot remove sandbox {self.container_id}: {r.stderr.strip()}")
 
 
 # For Claude Code (and the probe), the agent's user-level skills folder.

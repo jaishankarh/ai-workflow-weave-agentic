@@ -1,27 +1,31 @@
 """The pilot Product, sri-aurobindo-works-chat, as configured in this repo (#44).
 
-No sandboxes: these tests stop at loading the Product config and resolving each
-Repo's Coding standards against the Central skills this repo ships.
+The config is loaded as committed. Each Repo's Coding standards are observed the way
+an agent sees them: a probe run on the pilot config, with stand-in clones for its
+Repos, reports the always-on file and what it points at.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
-from conftest import make_repo
+from conftest import make_repo, probe_reports, probe_request, wait_until_ended
+from test_coding_standards import pointed_contents
 
-from workflow_weave.agent_worker import load_product_config
-from workflow_weave.agent_worker.standards import product_standards_path, resolve
+from workflow_weave.agent_worker import Outcome, load_product_config, load_subscription_store
 
 REPO = Path(__file__).resolve().parents[1]
 PILOT = "sri-aurobindo-works-chat"
 PILOT_CONFIG = REPO / "config" / "products" / f"{PILOT}.yaml"
 CENTRAL = REPO / yaml.safe_load((REPO / "weave.yaml").read_text())["central_skills"]["location"]
+PILOT_STANDARDS = CENTRAL / "products" / PILOT / "coding-standards.md"
 CHAT, AHDISMOI = "sri-aurobindo-works-chat", "ahdismoi"
+CONTEXT = "# Context\n\nGlossary only.\n"
+CHAT_RULES = {"CLAUDE.md": "# chat\n", ".claude/rules/backend.md": "# backend\n", ".claude/rules/frontend.md": "# fe\n"}
 
 
 def test_the_pilot_product_config_loads_with_its_two_repos_on_their_base_branches():
@@ -33,44 +37,52 @@ def test_the_pilot_product_config_loads_with_its_two_repos_on_their_base_branche
     assert all(not r.skill_overrides for r in product.repos.values())
 
 
-def test_the_chat_repo_resolves_to_central_plus_its_claude_md_and_rules_files(tmp_path):
-    product = load_product_config(PILOT_CONFIG)
-    chat = product.repos[CHAT]
-    assert (chat.coding_standards, chat.rules_files) == ("central+repo", ("CLAUDE.md", ".claude/rules"))
+@pytest.fixture
+def pilot_worker(make_worker, tmp_path):
+    """A worker on the pilot config as committed, except each Repo's `source`: the real
+    Repos are not cloned here, so stand-ins with the same rules files take their place."""
+    config = yaml.safe_load(PILOT_CONFIG.read_text())
+    stand_ins = {
+        CHAT: {"CONTEXT.md": CONTEXT, **CHAT_RULES, "src/app.py": ""},
+        AHDISMOI: {"CONTEXT.md": CONTEXT, "CLAUDE.md": "# not selected: central only\n"},
+    }
+    for name, files in stand_ins.items():
+        repo = config["repos"][name]
+        repo["source"] = str(make_repo(tmp_path / "stand-ins" / name, files, branch=repo["base_branch"]))
+    store = tmp_path / "pilot-subscriptions.yaml"
+    store.write_text(
+        "subscriptions:\n  pilot-probe:\n    agent: probe\n    cap: 2\n    env: {PROBE_TOKEN: t}\n"
+        f"products:\n  {PILOT}:\n    probe: [pilot-probe]\n"
+    )
+    worker = make_worker(
+        products=[PILOT], subscriptions=load_subscription_store(store),
+        product_yaml=yaml.safe_dump(config), central_skills_location=CENTRAL,
+    )
+    yield worker
+    worker.shutdown()
 
-    # The real chat repo is not cloned here: a stand-in with the same rules files takes its place.
-    source = make_repo(tmp_path / "chat", {
-        "CLAUDE.md": "# chat\n", ".claude/rules/backend.md": "# backend\n", ".claude/rules/frontend.md": "# fe\n",
-        "src/app.py": "",
-    }, branch=chat.base_branch)
-    product = dataclasses.replace(product, repos={CHAT: dataclasses.replace(chat, source=str(source))})
 
-    resolved = resolve(product, [(CHAT, chat.base_branch)], CENTRAL)
-
-    [repo] = resolved.repos
-    assert repo.mode == "central+repo"
-    assert [f.staged_as.removeprefix("weave/coding-standards/") for f in repo.files] == [
-        "product/coding-standards.md",
-        f"repos/{CHAT}/CLAUDE.md",
-        f"repos/{CHAT}/.claude/rules/backend.md",
-        f"repos/{CHAT}/.claude/rules/frontend.md",
-    ]
+def _pointed(worker, repo: str) -> list[str]:
+    """What the always-on file points the agent at, in a probe run on one pilot Repo."""
+    started = worker.start(probe_request({"end": "succeed"}, product=PILOT, repos=[repo]))
+    final = wait_until_ended(worker, started.run_id)
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+    [report] = probe_reports(worker.record(started.run_id).event_log)
+    return pointed_contents(report)
 
 
-def test_ahdismoi_resolves_to_the_central_product_standards_alone():
-    product = load_product_config(PILOT_CONFIG)
-    ahdismoi = product.repos[AHDISMOI]
-    assert (ahdismoi.coding_standards, ahdismoi.rules_files) == ("central", ())
+def test_the_chat_repo_resolves_to_central_plus_its_claude_md_and_rules_files(pilot_worker):
+    assert sorted(_pointed(pilot_worker, CHAT)) == sorted(
+        [CONTEXT, PILOT_STANDARDS.read_text(), *CHAT_RULES.values()]
+    )
 
-    resolved = resolve(product, [(AHDISMOI, ahdismoi.base_branch)], CENTRAL)
 
-    [repo] = resolved.repos
-    assert [f.staged_as for f in repo.files] == ["weave/coding-standards/product/coding-standards.md"]
-    assert repo.files[0].content == product_standards_path(CENTRAL, PILOT).read_bytes()
+def test_ahdismoi_resolves_to_the_central_product_standards_alone(pilot_worker):
+    assert sorted(_pointed(pilot_worker, AHDISMOI)) == sorted([CONTEXT, PILOT_STANDARDS.read_text()])
 
 
 def test_the_product_coding_standards_file_is_short_and_holds_the_diff_judgeable_rules():
-    text = product_standards_path(CENTRAL, PILOT).read_text()
+    text = PILOT_STANDARDS.read_text()
 
     assert len(text.splitlines()) <= 40
     rules = re.findall(r"^## (.+)$", text, re.M)
