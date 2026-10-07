@@ -162,8 +162,14 @@ One stored account credential for one agent provider (a Claude Code, Cursor or K
 _Avoid:_ "token", "API key" alone (a Subscription is the account, whatever credential reaches it); "account" alone (also the human's Tracker login).
 
 ## Agent toolset
-The skills and MCP servers staged into one agent run. Skills come from the **Central skills** plus the Repo's own; MCP servers come from a Product-wide catalog. A database MCP server only ever connects to that run's own Environment, wired from the services its Run recipes bring up, and is enabled only when a Run recipe brings up that database; never to a shared or production database.
+The skills and MCP servers staged into one agent run. Skills come from the **Central skills** plus the Repo's own; MCP servers are **Environment MCP servers** and **External MCP servers**, and nothing else (a Repo's own MCP config is not used).
 _Avoid:_ "plugins", "tools" alone (both also name an agent's built-in abilities).
+
+## Environment MCP server
+An MCP server for one database in a run's Environment: one per database, started for that run, wired to that database before the agent starts, and gone when the run ends. Exists only for a database the Run recipe names and whose kind the Product enables; full read-write, since the data is the run's own.
+
+## External MCP server
+An MCP server a Repo's Run recipe declares for something outside the Environment, defined the same for every run; each run starts its own copy. Reaches outside systems only with credentials from the Product's sandbox-only secrets, so never staging or production, and never the Product's Tracker or Code host.
 
 When a Repo's own skill shares a name with a central skill, the central skill is used unless a **Skill override** says otherwise. Every such clash is reported in the run's log.
 
