@@ -15,4 +15,5 @@ A Story's Tasks often depend on each other across Repos (a frontend Task calls a
 - One slow Task delays Proofs for the whole Story. A single-Task Story is unaffected.
 - Environments run nested Docker inside the sandbox (sysbox), never the host socket; this, and an Android emulator with KVM inside it, are unproven and must be shown by a spike before build. Until then mobile UI is "not provable here"; iOS is always "not provable here" (needs macOS).
 - Secrets come from a per-Product set of sandbox/test credentials (e.g. Korona test businesses), never staging or production; seed data is synthetic and committed in the Repo.
+  *Amended by [ADR 0011](0011-environments-start-from-run-images-and-tracked-seed-scripts.md):* "seeded fresh" means no run inherits another run's state; Environments start from prebuilt Run images and run only pending Seed scripts. The secrets set is named **Test secrets** (decided in #21's grilling).
 - A Repo without a Run recipe cannot be run by agents; its spec items are "not provable here".
