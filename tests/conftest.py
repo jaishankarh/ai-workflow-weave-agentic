@@ -41,6 +41,8 @@ CLAUDE_CODE_IMAGE = f"weave/claude-code:{_TAG}"
 # The Claude Code image with the probe added: what the Claude Code Agent profile's
 # sandbox gives an agent, seen by the probe instead of Claude Code.
 PROBE_CLAUDE_CODE_IMAGE = f"weave/probe-claude-code:{_TAG}"
+# TEST ONLY: the Claude Code image with Claude Code pointed at a scripted fake Messages API.
+FAKE_API_CLAUDE_CODE_IMAGE = f"weave/claude-code-fake-api:{_TAG}"
 PRODUCT = "probe-product"
 # The Subscription the default Product leases: roomy enough never to be full.
 PROBE_SUBSCRIPTION = "probe-subscription"
@@ -80,6 +82,14 @@ def claude_code_image(sandbox_image: str) -> str:
     if _building():
         _docker_build(CLAUDE_CODE_IMAGE, ROOT / "sandbox" / "claude-code", {"SANDBOX_IMAGE": sandbox_image})
     return CLAUDE_CODE_IMAGE
+
+
+@pytest.fixture(scope="session")
+def fake_api_claude_code_image(claude_code_image: str) -> str:
+    if _building():
+        _docker_build(FAKE_API_CLAUDE_CODE_IMAGE, ROOT / "tests" / "fake_anthropic",
+                      {"CLAUDE_CODE_IMAGE": claude_code_image})
+    return FAKE_API_CLAUDE_CODE_IMAGE
 
 
 @pytest.fixture(scope="session")

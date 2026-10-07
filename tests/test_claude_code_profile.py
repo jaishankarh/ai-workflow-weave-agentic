@@ -136,3 +136,42 @@ def _event_span(event_log: Path):
     times = [datetime.fromisoformat(json.loads(line)["timestamp"]) for line in event_log.read_text().splitlines()]
     assert times, "empty event log"
     return min(times), max(times)
+
+
+# --------------------------------------------------------------------------- the real Claude Code, on a scripted fake API
+
+
+@pytest.fixture
+def claude_code_on_fake_api(fake_api_claude_code_image):
+    """The real Claude Code Agent profile, its model answers scripted (tests/fake_anthropic/)."""
+    return claude_code_profile(image=fake_api_claude_code_image)
+
+
+def agent_said(event_log: Path) -> str:
+    """Everything the agent replied in the run, from the saved event log."""
+    import json
+
+    said = []
+    for line in event_log.read_text().splitlines():
+        ev = json.loads(line)
+        if ev.get("kind") == "StreamingDeltaEvent" and ev.get("source") == "agent":
+            said.append(ev.get("content") or "")
+    return "".join(said)
+
+
+def test_permissions_are_auto_approved_and_a_run_needs_no_interactive_input(
+    make_worker, claude_code_on_fake_api, tmp_path
+):
+    # Each of these asks for permission in Claude Code's default mode: a shell command,
+    # and a file written outside the working directory.
+    store = subscription_store(tmp_path, {"CLAUDE_CODE_OAUTH_TOKEN": FAKE_TOKEN})
+    turns = [
+        {"tool": "Bash", "input": {"command": "echo RAN-$((6*7))", "description": "run a command"}},
+        {"tool": "Write", "input": {"file_path": "/etc/weave-permission-check", "content": "WROTE-OUTSIDE\n"}},
+        {"tool": "Bash", "input": {"command": "cat /etc/weave-permission-check", "description": "read it back"}},
+        {"seen": ["RAN-42", "WROTE-OUTSIDE"]},
+    ]
+    final, record, _ = run_as_claude_code(make_worker, claude_code_on_fake_api, store, {"turns": turns})
+
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+    assert "seen: RAN-42, WROTE-OUTSIDE" in agent_said(record.event_log)
