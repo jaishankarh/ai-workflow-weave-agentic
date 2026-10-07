@@ -71,7 +71,7 @@ An isolated, throwaway set of containers running a Story's software for one agen
 _Avoid:_ "staging" (the shared deploy target after merge), "sandbox" alone (the agent's own workspace), "proof environment".
 
 ## Run image
-A prebuilt image of one service in a Repo's Run recipe, used by every Environment of that Repo so it need not be built each run: an app service with its dependencies installed, or a database with its base data inside. Built by a human from the Base branch whenever they judge it too old; never replaced by a run. An app Run image is reused only while the files it was built from are unchanged in the run's working copy; source code is never one of them. A Repo without Run images still runs, more slowly.
+A prebuilt image of one service in a Repo's Run recipe, used by every Environment of that Repo so it need not be built each run: an app service with its dependencies installed, or a database with its base data inside. Built by a human from the Base branch whenever they judge it too old; never replaced by a run. An app Run image is reused only while the files it was built from are unchanged in the run's working copy; source code is never one of them. A service the Run recipe marks as rebuilt every run (e.g. a frontend served from its production build) is always built in the run, using its Run image only to build faster. A Repo without Run images still runs, more slowly.
 _Avoid:_ "base image" (sounds like the Base branch, and like a Dockerfile's FROM image).
 
 ## Seed script
