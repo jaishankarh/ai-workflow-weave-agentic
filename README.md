@@ -231,7 +231,8 @@ x-weave:
 
 `command` is a string (run with `sh -c`) or a list (run as is). A recipe may have no services. It
 may also name the Repos it needs: `x-weave: {depends_on: [svc]}`. The other `x-weave` fields of
-Spec 2 (databases, MCP servers) are not read yet; `secrets` is (next section), and so is `seed`:
+Spec 2's external MCP servers are not read yet; `secrets` is (see "Test secrets"), and so are `seed` and
+`databases` (see "Environment MCP servers"). `seed`:
 
 ```yaml
 x-weave:
@@ -320,6 +321,54 @@ values are never in it or in the agent's environment: when `rebuild` or `reset` 
 container it reads the values back from the Repo's own containers and hands them on exactly as bring-up
 does (only the secrets the recipe names), and its output is redacted of them.
 
+#### Environment MCP servers
+
+The agent can read and change the data its code produced through MCP, without writing connection
+code. A recipe names its databases, and a Product says which kinds it enables:
+
+```yaml
+# .weave/compose.yaml
+x-weave:
+  databases:
+    - service: db                 # one of the recipe's own services
+      kind: postgres              # postgres | neo4j | mysql | redis
+      port: 5432                  # optional; the kind's default
+      credentials:                # the throwaway database's own, so in the committed recipe (not Test secrets)
+        user: {env: POSTGRES_USER}        # a value, or `env: NAME` read from the service's own `environment:`
+        password: app-pw
+        database: chat                    # Neo4j: optional, default `neo4j`
+# config/products/<product>.yaml
+database_mcp_kinds: [postgres, neo4j]     # kinds this Product enables; default none
+```
+
+Only a database a recipe names is considered (nothing is guessed from an image). Each one of an
+enabled kind gets one read-write MCP server for the run, started by the agent's Claude Code from its
+user-level configuration (`~/.claude.json` `mcpServers`, written by `stage_mcp_servers` in
+`sandbox.py` after seeding and before the agent starts; never a working copy's `.mcp.json`), named
+`<repo>-<service>` and given one host only: the database's address `<service>.<repo>` in that run's own
+Environment. Servers are processes in the run's sandbox and go with it. A named database of a kind the
+Product has not enabled gets no server, and neither does Redis (which is in the Environment only); the
+run's `run.log` has a line for each, and the run record lists `environment_mcp_servers` (name, Repo,
+service, kind, address, pinned server) and `environment_mcp_omitted` (Repo, service, kind, reason). The record
+and the log never hold a credential. The Repo's own skills load as before. The built-in catalog
+(`agent_worker/mcp.py`) pins:
+
+| kind | server (PyPI) | settings it is given |
+| --- | --- | --- |
+| postgres | `postgres-mcp` 0.3.0 (`--access-mode=unrestricted`) | `DATABASE_URI` |
+| neo4j | `mcp-neo4j-cypher` 0.6.0 (no `--read-only`) | `NEO4J_URI`, `_USERNAME`, `_PASSWORD`, `_DATABASE` |
+| mysql | `mysql-mcp-server` 0.4.4 | `MYSQL_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_DATABASE` |
+
+They are installed when the sandbox image is built, each in its own virtualenv `/opt/weave-mcp/<kind>`,
+so a run needs no network to start one. `postgres-mcp` also pins `mcp[cli]==1.30.0`: its own
+`mcp>=1.5` now resolves to mcp 2.x, where it fails at import.
+
+The servers keep working across `weave-env rebuild` and `weave-env reset`: both give the recreated
+containers the same Environment network and the same `<service>.<repo>` alias a server is configured
+with, and the credentials are the committed recipe's, which neither command changes. Only the server's
+open connections end when the database container is replaced, so a server may need a fresh call or two to reconnect (a `reset`
+also empties the data and seeds it again, which the server then sees).
+
 #### Test secrets
 
 A Product's Test secrets (credentials for test accounts and sandboxes of outside services, never
@@ -353,7 +402,9 @@ says so; a value is never written to the record, `run.log`, the saved service lo
 
 - `sandbox/Dockerfile`: the base sandbox image (agent-server, git, Python, and a Docker engine
   with Compose that starts only in a sandbox run on sysbox; see "Sandboxes on sysbox").
-  Its base image is the build ARG `BASE_IMAGE` (default `ubuntu:24.04`).
+  Its base image is the build ARG `BASE_IMAGE` (default `ubuntu:24.04`). It also holds the
+  catalog's pinned database MCP servers under `/opt/weave-mcp/<kind>` (build ARGs `*_MCP_VERSION`;
+  see "Environment MCP servers"); a base image needs Python 3.12 or later for them.
 - `sandbox/claude-code/Dockerfile`: the Claude Code Agent profile's image, on
   top of the sandbox image (build ARG `SANDBOX_IMAGE`). It pins Node.js
   22.22.0, the Claude Code CLI (`@anthropic-ai/claude-code` 2.1.287) and its ACP

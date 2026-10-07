@@ -58,6 +58,7 @@ from typing import Any, Callable, Mapping, Sequence
 import yaml
 
 from . import weave_env
+from .mcp import CATALOG, KINDS, NO_SERVER_KINDS, DatabaseSpec, default_port
 from .model import Outcome
 from .secret_store import SECRET_NAME, redact
 
@@ -165,6 +166,8 @@ class Recipe:
     secrets: tuple[str, ...] = ()
     # What to run once the services are ready (None: nothing to seed).
     seed: Seed | None = None
+    # The databases the recipe names (#55); only these can get an Environment MCP server.
+    databases: tuple[DatabaseSpec, ...] = ()
 
 
 def parse_recipe(repo: str, text: str) -> Recipe:
@@ -209,7 +212,74 @@ def parse_recipe(repo: str, text: str) -> Recipe:
         depends_on=tuple(depends_on),
         secrets=_parse_secret_names(block, bad),
         seed=_parse_seed(block, names, bad),
+        databases=_parse_databases(block, services, bad),
     )
+
+
+def _parse_databases(block: dict, services: dict, bad: Callable[[str], RecipeError]) -> tuple[DatabaseSpec, ...]:
+    raw = block.get("databases")
+    if raw is None:
+        return ()
+    where = f"`{WEAVE_KEY}.databases`"
+    if not isinstance(raw, list):
+        raise bad(f"has {where} that is not a list of databases (service, kind, credentials)")
+    found: list[DatabaseSpec] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise bad(f"has {where} with an entry that is not a mapping (service, kind, credentials)")
+        service = entry.get("service")
+        if not isinstance(service, str) or not service:
+            raise bad(f"has {where} with an entry without a `service`")
+        if service not in services:
+            raise bad(f"has {where} naming service {service!r}, which the recipe does not define")
+        if any(d.service == service for d in found):
+            raise bad(f"names service {service!r} twice in {where} (an MCP server is named for its Repo and service)")
+        here = f"{where} entry for service {service!r}"
+        kind = entry.get("kind")
+        if kind not in KINDS:
+            raise bad(f"has {here} with kind {kind!r}, which is not one of {', '.join(KINDS)}")
+        port = entry.get("port", default_port(kind))
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
+            raise bad(f"has {here} whose `port` is not a port number")
+        if kind in NO_SERVER_KINDS:
+            found.append(DatabaseSpec(service, kind, port))
+            continue
+        credentials = entry.get("credentials")
+        if not isinstance(credentials, dict):
+            raise bad(f"has {here} without `credentials` (user, password, database)")
+        env = _service_environment(services.get(service))
+        values: dict[str, str] = {}
+        for key in ("user", "password", "database"):
+            if key == "database" and key not in credentials and CATALOG[kind].default_database:
+                values[key] = CATALOG[kind].default_database
+                continue
+            if key not in credentials:
+                raise bad(f"has {here} whose credentials lack `{key}`")
+            values[key] = _credential(credentials[key], key, env, here, bad)
+        found.append(DatabaseSpec(service, kind, port, values["user"], values["password"], values["database"]))
+    return tuple(found)
+
+
+def _service_environment(service: Any) -> dict[str, str]:
+    """The literal `environment:` of a compose service (a mapping or a list of NAME=value)."""
+    env = service.get("environment") if isinstance(service, dict) else None
+    if isinstance(env, dict):
+        return {str(k): str(v) for k, v in env.items() if v is not None}
+    if isinstance(env, list):
+        return dict(str(item).split("=", 1) for item in env if "=" in str(item))
+    return {}
+
+
+def _credential(raw: Any, key: str, env: dict[str, str], where: str, bad: Callable[[str], RecipeError]) -> str:
+    """A credential: the value itself, or `{env: NAME}` for a variable of the service's own `environment`."""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, dict) and set(raw) == {"env"} and isinstance(raw["env"], str):
+        if raw["env"] not in env:
+            raise bad(f"has {where} whose `{key}` is `env: {raw['env']}`, but the service's own `environment` "
+                      f"does not set {raw['env']}")
+        return env[raw["env"]]
+    raise bad(f"has {where} whose `{key}` is neither a value nor `env: NAME`")
 
 
 def _parse_seed(block: dict, services: tuple[str, ...], bad: Callable[[str], RecipeError]) -> Seed | None:

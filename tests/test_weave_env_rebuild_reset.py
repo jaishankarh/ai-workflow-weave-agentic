@@ -201,3 +201,24 @@ def test_reset_of_an_environment_whose_repos_have_no_services_succeeds_having_do
     path = manifest_for(tmp_path, (("client", "x-weave:\n  depends_on: [svc]\n"),))
     code, _, _, _ = weave(tmp_path, "reset", shell=shell, manifest=path)
     assert code == 0 and not any("docker compose" in c for c in shell.commands)
+
+
+# ---- with the Environment MCP servers (#55): they address databases by `<service>.<repo>`
+
+def test_rebuild_and_reset_rejoin_the_network_under_the_address_an_environment_mcp_server_uses(tmp_path):
+    from workflow_weave.agent_worker.mcp import plan_environment_servers
+
+    plan = plan_environment_servers(
+        [("svc", [parse_db("db")])], {"postgres"},
+    )
+    (server,) = plan.started
+    for verb in (["rebuild", "svc"], ["reset"]):
+        _, _, shell, _ = weave(tmp_path, *verb)
+        connects = [argv_of(c) for c in shell.commands if argv_of(c)[:3] == ["docker", "network", "connect"]]
+        assert any(a[a.index("--alias") + 1] == server.address for a in connects), verb
+
+
+def parse_db(service):
+    from workflow_weave.agent_worker.mcp import DatabaseSpec
+
+    return DatabaseSpec(service=service, kind="postgres", port=5432, user="u", password="p", database="d")

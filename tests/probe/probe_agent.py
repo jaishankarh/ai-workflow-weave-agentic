@@ -492,6 +492,80 @@ def report_weave_env(ctx: dict[str, Any]) -> Any:
         results.append(item)
     return results or None
 
+def _user_mcp_servers() -> dict[str, Any]:
+    """The MCP servers in the agent's user-level configuration (`~/.claude.json`, `mcpServers`)."""
+    path = Path.home() / ".claude.json"
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text()).get("mcpServers") or {}
+
+
+async def _mcp_session(entry: dict[str, Any], work: Callable[[Any], Any]) -> Any:
+    """Start one configured stdio server as Claude Code does (its command, arguments and environment)
+    and run `work(session)` against it."""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    params = StdioServerParameters(command=entry["command"], args=entry.get("args", []), env=entry.get("env"))
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            return await work(session)
+
+
+def _in_own_loop(coro: Any) -> Any:
+    """Run a coroutine to the end from inside the probe's running event loop (in a thread of its own)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+def report_mcp(ctx: dict[str, Any]) -> Any:
+    """The agent's MCP servers, as its user-level configuration has them (script key ``mcp``, optional):
+
+    Always ``configured``: ``{name: {"command", "args", "env_names"}}`` (never an environment value).
+    ``{"tools": true}``  adds ``tools``: ``{name: [tool names]}``, asking each server.
+    ``{"calls": [{"server", "tool", "arguments"}]}``  adds ``calls``: the same dicts with ``ok`` and
+        ``text`` (the tool's text output) or ``error``. A failure is reported, never raised.
+    """
+    servers = _user_mcp_servers()
+    out: dict[str, Any] = {
+        "configured": {
+            name: {"command": e.get("command"), "args": e.get("args", []), "env_names": sorted(e.get("env") or {})}
+            for name, e in servers.items()
+        }
+    }
+    spec = ctx["script"].get("mcp") or {}
+    if spec.get("tools"):
+        out["tools"] = {}
+        for name, entry in servers.items():
+            try:
+                listed = _in_own_loop(_mcp_session(entry, lambda s: s.list_tools()))
+                out["tools"][name] = [t.name for t in listed.tools]
+            except BaseException as e:  # noqa: BLE001 - reported, not raised
+                out["tools"][name] = {"error": f"{type(e).__name__}: {e}"}
+    if calls := spec.get("calls"):
+        out["calls"] = []
+        for call in calls:
+            item: dict[str, Any] = dict(call)
+            try:
+                if call["server"] not in servers:
+                    raise LookupError(f"server {call['server']!r} is not configured")
+                result = _in_own_loop(_mcp_session(
+                    servers[call["server"]], lambda s, c=call: s.call_tool(c["tool"], c.get("arguments") or {})
+                ))
+                item["text"] = "".join(getattr(part, "text", "") for part in result.content)
+                item["ok"] = not result.isError
+                if result.isError:
+                    item["error"] = item["text"]
+            except BaseException as e:  # noqa: BLE001
+                item["ok"], item["error"] = False, f"{type(e).__name__}: {e}"
+                if isinstance(e, LookupError):
+                    item["error"] = str(e)
+            out["calls"].append(item)
+    return out
+
 
 REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "earlier_run_markers": report_earlier_run,
@@ -513,6 +587,7 @@ REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "docker_socket_mounts": report_docker_socket_mounts,
     "weave_env": report_weave_env,  # before "environment": what that sees is after these commands
     "environment": report_environment,
+    "mcp": report_mcp,
 }
 
 

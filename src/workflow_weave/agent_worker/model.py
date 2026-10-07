@@ -169,6 +169,11 @@ class RunRecord:
     # The Test secrets given to the run (#52): the names each Repo's recipe asked for,
     # {"<repo>": [names]}. Never a value. None: no recipe named any.
     test_secrets_given: dict[str, list[str]] | None = None
+    # Environment MCP servers (#55): those started for the run ({"name", "repo", "service", "kind",
+    # "address", "server"}; never a credential) and the named databases that got none, with the
+    # reason ({"repo", "service", "kind", "reason"}). None: no recipe named a database.
+    environment_mcp_servers: list[dict] | None = None
+    environment_mcp_omitted: list[dict] | None = None
     # How the Environment was brought up (#51): "branches" (some Repo ran from the Story's work)
     # and/or "base" (every Repo at its Base branch), in order. ["branches", "base"] is the one retry.
     # None: the run had no Environment.
