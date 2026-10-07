@@ -106,3 +106,33 @@ def test_the_claude_code_sandbox_env_holds_the_oauth_token_and_no_api_key_or_bas
     assert report["env_fingerprints"]["CLAUDE_CODE_OAUTH_TOKEN"] == hashlib.sha256(FAKE_TOKEN.encode()).hexdigest()
     assert "ANTHROPIC_API_KEY" not in report["env_names"]
     assert "ANTHROPIC_BASE_URL" not in report["env_names"]
+
+
+# --------------------------------------------------------------------------- the real Claude Code CLI
+
+
+@pytest.fixture
+def real_claude_code(claude_code_image):
+    return claude_code_profile(image=claude_code_image)
+
+
+def test_an_invalid_token_is_needs_setup_within_seconds(make_worker, real_claude_code, tmp_path):
+    # The real Claude Code CLI, asking api.anthropic.com with a token it has never issued.
+    store = subscription_store(tmp_path, {"CLAUDE_CODE_OAUTH_TOKEN": FAKE_TOKEN})
+    final, record, _ = run_as_claude_code(make_worker, real_claude_code, store, {"end": "succeed"})
+
+    assert final.outcome is Outcome.NEEDS_SETUP, final.reason
+    # The reason names the problem and Claude Code's own error (its API's 401).
+    assert "credential" in final.reason and "401" in final.reason, (final.reason, record.event_log.read_text()[-3000:])
+    first, last = _event_span(record.event_log)
+    assert (last - first).total_seconds() < 30, "the rejected token was retried instead of reported"
+    assert FAKE_TOKEN not in (record.event_log.read_text() + (tmp_path / "runs").joinpath(record.run_id, "record.json").read_text())
+
+
+def _event_span(event_log: Path):
+    import json
+    from datetime import datetime
+
+    times = [datetime.fromisoformat(json.loads(line)["timestamp"]) for line in event_log.read_text().splitlines()]
+    assert times, "empty event log"
+    return min(times), max(times)
