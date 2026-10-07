@@ -68,6 +68,51 @@ the Repo's own `.claude/skills/<name>` loads instead; overrides of
 to `run.log` and the record's `skill_clashes`; the record's `central_skills`
 holds the Central skills version and upstream commit.
 
+### Run inputs and outputs (ADR 0009)
+
+**Local tickets.** The spec and each Task are written on the Sandbox host under
+`runs_dir/<run id>/tickets/` and bind-mounted **read-only** into the sandbox at
+`/weave/tickets/` (the kernel refuses writes, even as root). Beside them is
+`/weave/tickets/issue-tracker.md`, a local-files tracker description modelled
+on upstream `setup-matt-pocock-skills/issue-tracker-local.md`. The run's prompt
+tells the agent to use it wherever a skill refers to
+`docs/agents/issue-tracker.md`, so upstream skills run unforked and nothing is
+written into a working copy. The agent works on a writable copy at
+`/weave/tracker/` (`spec.md`, `issues/NN-<slug>.md`, each with a `Status:`
+line); "closing" a ticket sets `Status: done`. When the run ends, before the
+sandbox is removed, the worker reads those lines back into the record's
+`tickets_done` (`spec`, `01`, `02`, ... in Task order). See
+`agent_worker/local_tickets.py`.
+
+**Push gateway.** The sandbox's only git credential is a random per-run token in
+the URL of its only remote, `origin` = `http://weave-git:<port>/<token>/<repo>.git`
+(`weave-git` maps to the Docker host). The worker runs a small smart-HTTP git
+server (`agent_worker/push_gateway.py`, `git http-backend`) on the Docker
+bridge gateway. Per run it keeps a bare mirror of each Repo whose
+`pre-receive` hook accepts only `refs/heads/<Integration branch>` (no deletes,
+tags or other branches, the Base branch included), and before accepting it
+pushes the commit onward to the Repo's `source` with the Sandbox host's own git
+credentials. A push is either refused or lands on the real Integration branch;
+the token is revoked and the mirrors deleted when the run ends.
+`WorkerSettings.push_gateway` lets several workers share one gateway (default:
+each worker starts its own).
+
+**No Tracker or Code host token.** Variables such as `GH_TOKEN`,
+`GITHUB_TOKEN` and `GITLAB_TOKEN` are dropped from the sandbox environment even
+if a Subscription's `env` names one (noted in `run.log`); the sandbox has no
+git credential helper and no `gh`/`glab` config, so an issue, comment, label or
+PR write has nothing to authenticate with.
+
+**For the real Code host (GitHub).** The design holds as is: the gateway is the
+only party with a GitHub credential, and the agent never sees it. Production
+needs: a Repo `source` that is the GitHub URL, and a Sandbox host credential
+that can push to it (a deploy key or fine-grained token with `contents: write`
+only, used by the hook's onward push); ideally a GitHub ruleset restricting
+that credential to the Integration branch pattern as a second line of defence;
+and, for larger Repos, a persistent mirror per Repo instead of a fresh clone
+per run. The gateway must listen only where sandboxes can reach it (the bridge
+gateway, not `0.0.0.0`).
+
 ### Images
 
 - `sandbox/Dockerfile`: the base sandbox image (agent-server, git, Python).

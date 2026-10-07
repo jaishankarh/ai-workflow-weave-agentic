@@ -20,6 +20,8 @@ from .model import NeedsSetup, NoCapacity, Outcome, RunRecord, RunRequest, RunSt
 from .outcomes import DONE_MARK, GAVE_UP_MARK, classify_error, classify_final_reply, last_error_detail
 from .sandbox import Sandbox, SandboxError, stage_skills
 from .subscriptions import Lease
+from . import local_tickets
+from .push_gateway import GATEWAY_HOST, PushGateway, RunRemotes, without_code_host_tokens
 from .staging import StagingError, StagingPlan, central_skills_version, read_repo_skills
 from .staging import plan as plan_skills
 from workflow_weave.central_skills import CentralSkills
@@ -64,6 +66,8 @@ class AgentWorker:
         self._runs: dict[str, _Run] = {}
         self._lock = threading.Lock()
         settings.runs_dir.mkdir(parents=True, exist_ok=True)
+        self._own_gateway = settings.push_gateway is None
+        self.push_gateway = settings.push_gateway or PushGateway()
 
     # ------------------------------------------------------------------ contract
 
@@ -174,6 +178,8 @@ class AgentWorker:
         for run in runs:
             if not run.done.is_set():
                 self.cancel(run.record.run_id)
+        if self._own_gateway:
+            self.push_gateway.shutdown()
 
     # ------------------------------------------------------------------ the run
 
@@ -183,21 +189,38 @@ class AgentWorker:
         product = self.settings.products[run.request.product]
         sandbox: Sandbox | None = None
         conversation = None
+        remotes: RunRemotes | None = None
         final: tuple[RunState, Outcome | None, str | None]
         try:
             staging = self._plan_skills(run, product)
+            originals = local_tickets.write_originals(
+                run.request.inputs, self.settings.runs_dir / rec.run_id / "tickets"
+            )
+            remotes = self.push_gateway.open_run(
+                self.settings.runs_dir / rec.run_id / "remotes",
+                {t.name: (product.repos[t.name].source, t.integration_branch) for t in run.request.repos},
+            )
+            env, dropped = without_code_host_tokens({**run.lease.env, "ACP_PROMPT_MAX_RETRIES": "0"})
+            if dropped:
+                self._note(rec, f"left out of the sandbox environment (Tracker / Code host tokens): {dropped}")
             sandbox = Sandbox(
                 image=profile.image,
                 run_id=rec.run_id,
                 product=rec.product,
-                # The credential goes in as sandbox environment only (ADR 0010, #13).
-                env={**run.lease.env, "ACP_PROMPT_MAX_RETRIES": "0"},
+                # The credential goes in as sandbox environment only (ADR 0010, #13);
+                # never a Tracker or Code host token (ADR 0009).
+                env=env,
                 nofile_limit=self.settings.sandbox_nofile_limit,
                 start_timeout=self.settings.sandbox_start_timeout,
+                # Read-only, so the agent cannot change the originals (ADR 0009).
+                mounts=[(str(originals.resolve()), local_tickets.ORIGINALS_DIR)],
+                extra_hosts=[f"{GATEWAY_HOST}:host-gateway"],
             )
+            sandbox.sh(local_tickets.MAKE_TRACKER, cwd="/")
             for target in run.request.repos:
                 sandbox.put_repo(
-                    product.repos[target.name].source, target.name, target.base_branch, target.integration_branch
+                    product.repos[target.name].source, target.name, target.base_branch, target.integration_branch,
+                    remotes.url(target.name),
                 )
             stage_skills(sandbox, staging)
             if run.cancel_requested.is_set():
@@ -223,6 +246,8 @@ class AgentWorker:
             final = (RunState.ENDED, Outcome.INFRA_FAILURE, f"{type(e).__name__}: {e}"[:2000])
         finally:
             leftovers = self._stop(conversation, sandbox, rec)
+            if remotes is not None:
+                self.push_gateway.close_run(remotes)  # the run's push token stops working
             self.settings.subscriptions.release(run.lease)  # however the run ended
         rec.processes_left_after_close = leftovers
         if leftovers:
@@ -269,6 +294,10 @@ class AgentWorker:
             try:
                 if conversation is not None:
                     leftovers = _settle(sandbox.processes)
+            except Exception:
+                pass
+            try:
+                rec.tickets_done = local_tickets.done_tickets(sandbox.sh(local_tickets.READ_STATUSES, cwd="/"))
             except Exception:
                 pass
             sandbox.destroy()
@@ -363,6 +392,7 @@ def _prompt(request: RunRequest) -> str:
     return (
         f"Run the `{request.skill}` skill.\n\n"
         f"Repos: {repos}\n\n"
+        f"{local_tickets.prompt_pointer()}\n\n"
         f"## Spec\n\n{request.inputs.spec}\n\n## Tasks\n\n{tasks}\n\n"
         f"When you have finished, end your last reply with the line `{DONE_MARK}`. "
         f"If you cannot complete the skill, end it with `{GAVE_UP_MARK}: <why>` instead.\n"

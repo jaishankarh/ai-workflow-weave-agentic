@@ -167,6 +167,157 @@ def report_prompt_attempts(ctx: dict[str, Any]) -> Any:
     return len(PROMPT_ATTEMPTS.read_text().splitlines()) if PROMPT_ATTEMPTS.exists() else 0
 
 
+_TRACKER_DOC_IN_PROMPT = re.compile(r"issue tracker is described in `([^`]+)`")
+
+
+def report_local_tickets(ctx: dict[str, Any]) -> Any:
+    """The tracker as an upstream skill finds it: the tracker description the prompt names,
+    the tickets it points at, and which read-only originals the probe managed to change."""
+    m = _TRACKER_DOC_IN_PROMPT.search(ctx.get("prompt", ""))
+    if not m:
+        return {"tracker": None}
+    doc = Path(m.group(1)).read_text()
+    heading = doc.splitlines()[0]
+    tracker = heading.split(":", 1)[1].strip().lower().replace(" ", "-")
+    tickets_dir = Path(re.search(r"Tickets live in `([^`]+)`", doc).group(1))
+    originals_dir = Path(re.search(r"originals are in `([^`]+)`", doc).group(1))
+    tickets = [{"kind": "spec", "path": str(tickets_dir / "spec.md"), "body": (tickets_dir / "spec.md").read_text()}]
+    for f in sorted((tickets_dir / "issues").glob("*.md")):
+        tickets.append({"kind": "task", "path": str(f), "body": f.read_text()})
+    originals = sorted(str(p) for p in originals_dir.rglob("*") if p.is_file())
+    return {"tracker": tracker, "tickets": tickets, "originals": originals,
+            "originals_changed": try_to_change(originals_dir)}
+
+
+def try_to_change(folder: Path) -> list[str]:
+    """Try to write, chmod, delete and add files in a folder; what succeeded."""
+    changed = []
+    for p in sorted(folder.rglob("*")):
+        if not p.is_file():
+            continue
+        attempts = [
+            ("write", lambda: p.open("a").write("tampered\n")),
+            ("chmod", lambda: os.chmod(p, 0o666)),
+            ("rename", lambda: os.rename(p, str(p) + ".moved")),
+            ("delete", lambda: p.unlink()),
+        ]
+        for what, attempt in attempts:
+            try:
+                attempt()
+                changed.append(f"{what} {p}")
+            except OSError:
+                pass
+    try:
+        (folder / "new.md").write_text("x")
+        changed.append(f"create {folder / 'new.md'}")
+    except OSError:
+        pass
+    return changed
+
+
+def _tracker_dir(prompt_text: str) -> Path:
+    doc = Path(_TRACKER_DOC_IN_PROMPT.search(prompt_text).group(1)).read_text()
+    return Path(re.search(r"Tickets live in `([^`]+)`", doc).group(1))
+
+
+def mark_done(prompt_text: str, ticket: str) -> dict[str, Any]:
+    """Close a ticket the way the tracker description says: set its Status line to done."""
+    folder = _tracker_dir(prompt_text)
+    [path] = [folder / "spec.md"] if ticket == "spec" else sorted((folder / "issues").glob(f"{ticket}-*.md"))
+    text = re.sub(r"^Status:.*$", "Status: done", path.read_text(), count=1, flags=re.MULTILINE)
+    path.write_text(text)
+    return {"action": "mark_done", "ticket": ticket, "ok": True}
+
+
+def push(branch: str) -> dict[str, Any]:
+    """Commit in the first working copy and push HEAD to `branch` on its remote."""
+    repo = next(d for d in sorted(WORKSPACE.iterdir()) if (d / ".git").exists())
+    _git(repo, "commit", "-q", "--allow-empty", "-m", f"probe commit for {branch}")
+    commit = _git(repo, "rev-parse", "HEAD")
+    r = subprocess.run(["git", "-C", str(repo), "push", "origin", f"HEAD:refs/heads/{branch}"],
+                       capture_output=True, text=True, timeout=60)
+    return {"action": "push", "branch": branch, "ok": r.returncode == 0, "commit": commit,
+            "output": (r.stderr or r.stdout)[-1500:]}
+
+
+CODE_HOST_API = "https://api.github.com"
+# What each Tracker / Code host write would POST (REST, as `gh` does it).
+CODE_HOST_WRITES = {
+    "issue": "/repos/{repo}/issues",
+    "comment": "/repos/{repo}/issues/1/comments",
+    "label": "/repos/{repo}/issues/1/labels",
+    "pr": "/repos/{repo}/pulls",
+}
+TOKEN_VARS = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITLAB_TOKEN"]
+
+
+def find_code_host_credential() -> str | None:
+    """Where an agent could get a Code host credential: a token variable, or git's credential store."""
+    for name in TOKEN_VARS:
+        if os.environ.get(name):
+            return f"env {name}"
+    r = subprocess.run(["git", "credential", "fill"], input="protocol=https\nhost=github.com\n\n",
+                       capture_output=True, text=True, timeout=15,
+                       env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false"})
+    if r.returncode == 0 and "password=" in r.stdout:
+        return "git credential helper"
+    return None
+
+
+def code_host_write(write: str) -> dict[str, Any]:
+    """Try a Tracker / Code host write the way an agent would: find a credential, then POST."""
+    from urllib.request import Request, urlopen
+
+    result: dict[str, Any] = {"action": "code_host_write", "write": write, "ok": False}
+    result["credential_found"] = cred = find_code_host_credential()
+    if cred is None:
+        result["error"] = "no credentials for the Tracker or Code host"
+        return result
+    token = os.environ.get(cred.removeprefix("env "), "")
+    req = Request(CODE_HOST_API + CODE_HOST_WRITES[write].format(repo="weave-fixture/app"),
+                  data=b"{}", method="POST", headers={"Authorization": f"token {token}"})
+    try:
+        with urlopen(req, timeout=10) as resp:
+            result["ok"] = 200 <= resp.status < 300
+            result["status"] = resp.status
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def run_actions(script: dict[str, Any], prompt_text: str) -> list[dict[str, Any]]:
+    """Do what the script asks before reporting; each action's result goes in the report."""
+    results = []
+    for ticket in script.get("mark_done", []):
+        results.append(_attempt(lambda: mark_done(prompt_text, ticket), {"action": "mark_done", "ticket": ticket}))
+    for branch in script.get("push", []):
+        results.append(_attempt(lambda: push(branch), {"action": "push", "branch": branch}))
+    for write in script.get("code_host_writes", []):
+        results.append(_attempt(lambda: code_host_write(write), {"action": "code_host_write", "write": write}))
+    return results
+
+
+def _attempt(fn: Callable[[], dict[str, Any]], what: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return fn()
+    except Exception as e:
+        return {**what, "ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+def report_git_credentials(ctx: dict[str, Any]) -> Any:
+    """Git credential helpers configured, and credential files present, for the agent's user."""
+    r = subprocess.run(["git", "config", "--get-all", "credential.helper"], capture_output=True, text=True)
+    candidates = [Path.home() / ".git-credentials", Path.home() / ".config" / "git" / "credentials",
+                  Path.home() / ".config" / "gh" / "hosts.yml", Path.home() / ".config" / "glab-cli" / "config.yml",
+                  Path.home() / ".netrc"]
+    return {"helpers": r.stdout.split(), "files": [str(p) for p in candidates if p.exists()]}
+
+
+def report_actions(ctx: dict[str, Any]) -> Any:
+    """Results of the actions the script asked for (done before the report)."""
+    return ctx.get("actions", [])
+
+
 REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "earlier_run_markers": report_earlier_run,
     "env_names": report_env_names,
@@ -178,6 +329,9 @@ REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "skills_loaded": report_skills_loaded,
     "working_copies": report_working_copies,
     "prompt_attempts": report_prompt_attempts,
+    "local_tickets": report_local_tickets,
+    "git_credentials": report_git_credentials,
+    "actions": report_actions,
 }
 
 
@@ -248,7 +402,8 @@ class ProbeAgent:
         text = "\n".join(getattr(b, "text", "") or "" for b in prompt)
         _count_attempt()
         script = parse_script(text)
-        report = build_report({"cwd": self._cwd, "script": script, "prompt": text})
+        actions = run_actions(script, text)
+        report = build_report({"cwd": self._cwd, "script": script, "prompt": text, "actions": actions})
         leave_markers()
         await self._send(
             session_id,

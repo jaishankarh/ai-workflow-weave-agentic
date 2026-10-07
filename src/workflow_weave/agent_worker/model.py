@@ -135,6 +135,9 @@ class RunRecord:
     skill_overrides_applied: list[str] | None = None
     # Every clash with a Repo's own skill and every override disagreement (also in run.log).
     skill_clashes: list[str] | None = None
+    # Local tickets the agent marked done (`spec`, `01`, `02`, ... in task order), read back
+    # from its tracker copy when the run ended (ADR 0009). None if they could not be read.
+    tickets_done: list[str] | None = None
 
     def status(self) -> RunStatus:
         return RunStatus(self.run_id, self.state, self.outcome, self.reason)

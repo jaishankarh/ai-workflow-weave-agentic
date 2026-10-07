@@ -47,7 +47,10 @@ class Sandbox:
         env: dict[str, str],
         nofile_limit: int | None,
         start_timeout: float,
+        mounts: list[tuple[str, str]] = (),
+        extra_hosts: list[str] = (),
     ) -> None:
+        """`mounts` are (host path, sandbox path) pairs, mounted read-only."""
         self.run_id = run_id
         self._api_key = secrets.token_urlsafe(24)
         port = _free_port()
@@ -62,6 +65,10 @@ class Sandbox:
         ]
         if nofile_limit:
             cmd += ["--ulimit", f"nofile={nofile_limit}:{nofile_limit}"]
+        for host_path, sandbox_path in mounts:
+            cmd += ["--mount", f"type=bind,source={host_path},target={sandbox_path},readonly"]
+        for h in extra_hosts:
+            cmd += ["--add-host", h]
         for k, v in env.items():
             cmd += ["-e", f"{k}={v}"]
         cmd += [image, "--host", "0.0.0.0", "--port", "8000"]
@@ -96,8 +103,9 @@ class Sandbox:
             raise SandboxError(f"`{command}` failed ({r.exit_code}): {(r.stderr or r.stdout or '').strip()[-1000:]}")
         return r.stdout or ""
 
-    def put_repo(self, source: str, name: str, base_branch: str, integration_branch: str) -> None:
-        """Clone a Repo from the Sandbox host into the sandbox and check out its Integration branch."""
+    def put_repo(self, source: str, name: str, base_branch: str, integration_branch: str, remote_url: str) -> None:
+        """Clone a Repo from the Sandbox host into the sandbox, check out its Integration
+        branch, and make `remote_url` (the push gateway) its only remote."""
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp) / f"{name}.bundle"
             r = subprocess.run(["git", "-C", source, "bundle", "create", str(bundle), "--all"], capture_output=True, text=True)
@@ -108,6 +116,7 @@ class Sandbox:
         dest = f"{WORKDIR}/{name}"
         self.sh(f"git clone -q --branch {base_branch} {remote_bundle} {dest}")
         self.sh(f"git checkout -q -B {integration_branch}", cwd=dest)
+        self.sh(f"git remote set-url origin {remote_url} && rm -f {remote_bundle}", cwd=dest)
 
     def processes(self) -> list[str]:
         """Command lines of live processes, apart from the agent-server itself."""

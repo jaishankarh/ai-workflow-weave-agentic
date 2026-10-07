@@ -151,8 +151,9 @@ def test_the_probe_sees_the_leased_credential_env_and_start_result_and_run_recor
     assert "token-of-cursor-a" not in repr(started)
     record_text = (runs_dir / started.run_id / "record.json").read_text()
     assert json.loads(record_text)["subscription"] == "cursor-a"
-    for saved in (runs_dir / started.run_id).iterdir():
-        assert "token-of-cursor-a" not in saved.read_text(), f"credential leaked into {saved.name}"
+    for saved in (runs_dir / started.run_id).rglob("*"):
+        if saved.is_file():
+            assert "token-of-cursor-a" not in saved.read_text(), f"credential leaked into {saved.name}"
 
 
 def test_credentials_reach_the_sandbox_as_environment_not_as_openhands_conversation_secrets(worker):
