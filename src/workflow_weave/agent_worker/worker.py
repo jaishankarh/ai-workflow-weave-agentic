@@ -18,7 +18,8 @@ from openhands.sdk.conversation.response_utils import get_agent_final_response
 from .config import WorkerSettings
 from .model import NeedsSetup, NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
 from .outcomes import DONE_MARK, GAVE_UP_MARK, classify_error, classify_final_reply, last_error_detail
-from .sandbox import Sandbox, SandboxError, stage_skills
+from .sandbox import WORKDIR, Sandbox, SandboxError, stage_skills, stage_user_files
+from . import standards
 from .subscriptions import Lease
 from . import local_tickets
 from .push_gateway import GATEWAY_HOST, PushGateway, RunRemotes, without_code_host_tokens
@@ -100,7 +101,9 @@ class AgentWorker:
 
         Checked in order, from the Sandbox host alone (no sandbox, no lease):
         the Product has a Subscription for the agent; every Repo has a
-        `CONTEXT.md` on its Base branch.
+        `CONTEXT.md` on its Base branch; every selected Coding standards file
+        exists (the Product's file in the Central skills, each Repo's named
+        rules files on its Base branch).
         """
         if not self.settings.subscriptions.associated(request.product, agent):
             return (
@@ -119,7 +122,16 @@ class AgentWorker:
                 f"Repo {names} has no CONTEXT.md on its Base branch ({branches}): "
                 f"onboard it (e.g. setup-matt-pocock-skills) before running agents on it"
             )
+        absent = standards.missing(
+            product, [(t.name, t.base_branch) for t in request.repos], self._central_location()
+        )
+        if absent:
+            return "Coding standards missing: " + "; ".join(absent)
         return None
+
+    def _central_location(self) -> Path | None:
+        loc = self.settings.central_skills_location
+        return Path(loc) if loc is not None else None
 
     def _launch(self, request: RunRequest, lease: Lease) -> Started:
         run_id = _new_run_id()
@@ -193,6 +205,9 @@ class AgentWorker:
         final: tuple[RunState, Outcome | None, str | None]
         try:
             staging = self._plan_skills(run, product)
+            resolved = standards.resolve(
+                product, [(t.name, t.base_branch) for t in run.request.repos], self._central_location()
+            )
             originals = local_tickets.write_originals(
                 run.request.inputs, self.settings.runs_dir / rec.run_id / "tickets"
             )
@@ -223,6 +238,10 @@ class AgentWorker:
                     remotes.url(target.name),
                 )
             stage_skills(sandbox, staging)
+            # The always-on file and the resolved Coding standards, at user level (ADR 0002).
+            user_dir = stage_user_files(sandbox, lambda d: resolved.tarball(d, WORKDIR))
+            rec.always_on_file = f"{user_dir}/{standards.ALWAYS_ON_FILE}"
+            rec.coding_standards = {r.repo: [f.origin for f in r.files] for r in resolved.repos}
             if run.cancel_requested.is_set():
                 raise _Cancelled
 

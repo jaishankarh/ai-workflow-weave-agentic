@@ -25,7 +25,7 @@ when every associated Subscription is full (not an outcome; queue and retry),
 or `NeedsSetup(reason)` (outcome `needs-setup`) when a pre-check fails, without
 taking a lease or starting a sandbox. The pre-checks, in order: the Product has a
 Subscription associated for the agent; every Repo has a `CONTEXT.md` on its Base
-branch. The lease is released however the run ends, cancel included. The credential
+branch; every selected Coding standards file exists. The lease is released however the run ends, cancel included. The credential
 goes only into the sandbox environment; results and run records carry the
 Subscription's name. The store is one YAML file on the Sandbox host
 (`subscription_store.location` in `weave.yaml`; format in
@@ -67,6 +67,25 @@ the Repo's own `.claude/skills/<name>` loads instead; overrides of
 `PROTECTED_SKILLS` are refused on load. Clashes and override disagreements go
 to `run.log` and the record's `skill_clashes`; the record's `central_skills`
 holds the Central skills version and upstream commit.
+
+### Coding standards and the always-on file
+
+Each Repo's `coding_standards` in the Product config is `central` (default),
+`central+repo` or `repo`; except under `central` it must name `rules_files`
+(paths in the Repo, files or folders), or loading the config fails. The
+Product's own file lives in the Central skills at
+`<central_skills.location>/products/<Product>/coding-standards.md` (here
+`skills/products/<Product>/coding-standards.md`). A Repo's rules files are read
+with git from its **Base branch** on the Sandbox host, never from the working
+branch or the agent's working copy. A selected file that is missing refuses the
+run as `needs-setup` naming it, before any sandbox starts.
+
+The resolved files are copied to `~/.claude/weave/coding-standards/` in the
+sandbox and an always-on file is staged as the user-level `~/.claude/CLAUDE.md`,
+pointing at each Repo's `CONTEXT.md` in its working copy and at those copies.
+Nothing goes into a working copy, so the Repo's own `CLAUDE.md` loads as committed.
+The record keeps `always_on_file` and, per Repo, where each standard was read
+from (`coding_standards`). See `agent_worker/standards.py`.
 
 ### Run inputs and outputs (ADR 0009)
 

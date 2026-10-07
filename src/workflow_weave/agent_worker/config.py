@@ -20,13 +20,31 @@ class RepoConfig:
 
     `source` is where the sandbox clones the Repo from; for now a path on the
     Sandbox host. `skill_overrides` names central skills for which this Repo's
-    own skill of the same name is used instead. Later tickets add
-    `coding_standards` and `rules_files` here.
+    own skill of the same name is used instead.
+
+    `coding_standards` selects the Repo's Coding standards: `central` (the
+    Product's one coding-standards file), `central+repo` (that file and the
+    Repo's own `rules_files`) or `repo` (the Repo's own `rules_files` alone).
+    A rules file is a path in the Repo, a file or a folder of files, always
+    read as it stands on the Repo's Base branch.
     """
 
     name: str
     source: str
     skill_overrides: frozenset[str] = frozenset()
+    coding_standards: str = "central"
+    rules_files: tuple[str, ...] = ()
+
+    @property
+    def uses_product_standards(self) -> bool:
+        return self.coding_standards in ("central", "central+repo")
+
+    @property
+    def uses_repo_rules(self) -> bool:
+        return self.coding_standards in ("central+repo", "repo")
+
+
+CODING_STANDARDS_MODES = ("central", "central+repo", "repo")
 
 
 # Skills whose output the Dispatcher reads back: a Skill override naming one is
@@ -54,6 +72,8 @@ def load_product_config(path: str | Path, protected_skills: frozenset[str] = PRO
       ahdismoi:
         source: /srv/repos/ahdismoi
         skill_overrides: [tdd]     # optional; never a protected skill
+        coding_standards: central+repo   # central (default) | central+repo | repo
+        rules_files: [CLAUDE.md, .claude/rules]   # required unless central
     ```
     """
     data = yaml.safe_load(Path(path).read_text()) or {}
@@ -72,7 +92,26 @@ def load_product_config(path: str | Path, protected_skills: frozenset[str] = PRO
                 f"{path}: repo {repo_name!r}: a Skill override is not allowed for protected skill(s) "
                 f"{', '.join(refused)} (their output is read back by the Dispatcher)"
             )
-        repos[repo_name] = RepoConfig(name=repo_name, source=str(repo["source"]), skill_overrides=frozenset(overrides))
+        mode = repo.get("coding_standards") or "central"
+        if mode not in CODING_STANDARDS_MODES:
+            raise ProductConfigError(
+                f"{path}: repo {repo_name!r}: 'coding_standards' must be one of {', '.join(CODING_STANDARDS_MODES)}, "
+                f"not {mode!r}"
+            )
+        rules = repo.get("rules_files") or []
+        if not isinstance(rules, list) or not all(isinstance(r, str) and r.strip("/") for r in rules):
+            raise ProductConfigError(f"{path}: repo {repo_name!r}: 'rules_files' must be a list of paths in the Repo")
+        if mode != "central" and not rules:
+            raise ProductConfigError(
+                f"{path}: repo {repo_name!r}: coding_standards {mode!r} needs 'rules_files' naming the Repo's rules files"
+            )
+        repos[repo_name] = RepoConfig(
+            name=repo_name,
+            source=str(repo["source"]),
+            skill_overrides=frozenset(overrides),
+            coding_standards=mode,
+            rules_files=tuple(r.strip("/") for r in rules),
+        )
     return ProductConfig(name=name, repos=repos)
 
 

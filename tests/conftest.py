@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -108,6 +109,15 @@ def runs_dir(tmp_path: Path) -> Path:
 REPO_CENTRAL_SKILLS = central_skills.load(ROOT / "weave.yaml").location
 
 
+def add_product_standards(location: Path, products: list[str]) -> None:
+    """Give each Product a coding-standards file in a Central skills location (#41)."""
+    for name in products:
+        f = location / "products" / name / "coding-standards.md"
+        if not f.exists():
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(f"# Coding standards: {name}\n\n- No swallowed errors.\n")
+
+
 @pytest.fixture
 def make_worker(
     tmp_path: Path, runs_dir: Path, onboarded_repo: Path, probe_profile: AgentProfile
@@ -135,8 +145,15 @@ def make_worker(
         subscriptions=None,
         *,
         product_yaml: str | None = None,
-        central_skills_location: Path = REPO_CENTRAL_SKILLS,
+        central_skills_location: Path | None = None,
     ) -> AgentWorker:
+        if central_skills_location is None:
+            # This repo's Central skills, plus a coding-standards file for each test Product.
+            central_skills_location = tmp_path / "repo-central-skills"
+            if not central_skills_location.exists():
+                shutil.copytree(REPO_CENTRAL_SKILLS, central_skills_location,
+                                ignore=shutil.ignore_patterns("products"))
+            add_product_standards(central_skills_location, products)
         settings = WorkerSettings(
             runs_dir=runs_dir,
             products={

@@ -163,3 +163,23 @@ def stage_skills(sandbox: Sandbox, plan) -> None:
         remote = "/tmp/weave-staging/skills.tar"
         sandbox.workspace.file_upload(archive, remote)
     sandbox.sh(f'mkdir -p "{USER_SKILLS_DIR}" && tar -xf {remote} -C "{USER_SKILLS_DIR}" && rm -f {remote}', cwd="/")
+
+
+# For Claude Code (and the probe), the agent's user-level folder: the always-on file
+# (`CLAUDE.md`) and the staged Coding standards go here.
+USER_LEVEL_DIR = "$HOME/.claude"
+
+
+def stage_user_files(sandbox: Sandbox, make_tarball) -> str:
+    """Unpack `make_tarball(<user-level folder's absolute path>)` into the user-level folder.
+
+    Returns that folder's absolute path. Never touches a working copy.
+    """
+    user_dir = sandbox.sh(f'mkdir -p "{USER_LEVEL_DIR}" && cd "{USER_LEVEL_DIR}" && pwd', cwd="/").strip()
+    with tempfile.TemporaryDirectory() as tmp:
+        archive = Path(tmp) / "user-files.tar"
+        archive.write_bytes(make_tarball(user_dir))
+        remote = "/tmp/weave-staging/user-files.tar"
+        sandbox.workspace.file_upload(archive, remote)
+    sandbox.sh(f'tar -xf {remote} -C "{user_dir}" && rm -f {remote}', cwd="/")
+    return user_dir
