@@ -34,6 +34,13 @@ class RunRequest:
     repos: list[RepoTarget]
     skill: str
     inputs: RunInputs
+    # The Repo whose Task the agent is working on, among `repos` (default: the first). Its working
+    # copy is what its Environment runs from; any other Repo in `repos` runs from its Task branch.
+    working_on: str | None = None
+
+    @property
+    def working_repo(self) -> str:
+        return self.working_on or self.repos[0].name
 
 
 class Outcome(str, enum.Enum):
@@ -150,6 +157,9 @@ class RunRecord:
     # run had no Environment.
     environment_services: list[dict] | None = None
     environment_logs: dict[str, str] | None = None
+    # Several Repos (#50): every Repo in the Environment and what it ran from ({"repo", "source":
+    # "working copy" | "Task branch" | "Base branch", "branch", "touched"}), dependencies first.
+    environment_repos: list[dict] | None = None
 
     def status(self) -> RunStatus:
         return RunStatus(self.run_id, self.state, self.outcome, self.reason, self.tickets_done)

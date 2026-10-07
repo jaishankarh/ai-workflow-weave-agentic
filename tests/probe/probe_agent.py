@@ -416,6 +416,7 @@ def report_environment(ctx: dict[str, Any]) -> Any:
         on the Environment network (resolved to the container's IP on that network, as the sandbox's
         own resolver does not know ``<service>.<repo>``), with no retry.
     ``exec_in_service``: ``[{"repo", "service", "command"}]``  run a shell command in a service's container.
+    ``resolve``: ``["<service>.<repo>", ...]``  what the sandbox's own resolver answers for each name.
     ``list_containers``: true  every container in the sandbox's own engine, running or not.
     """
     from urllib.request import urlopen
@@ -435,6 +436,8 @@ def report_environment(ctx: dict[str, Any]) -> Any:
                     ip = _docker("inspect", "-f", "{{" + net + ".IPAddress}}", cid).stdout.strip()
                     aliases = _docker("inspect", "-f", "{{" + net + ".Aliases}}", cid).stdout
                     item["alias_ok"] = f"{spec['service']}.{spec['repo']}" in aliases
+                    # Compose's own bare-name alias would clash across Repos (#50).
+                    item["bare_alias"] = spec["service"] in aliases.strip("[]").split()
                     with urlopen(f"http://{ip}:{spec['port']}{spec.get('path', '/')}", timeout=5) as r:
                         item["status"], item["body"] = r.status, r.read().decode()[:500]
             except Exception as e:
@@ -446,16 +449,23 @@ def report_environment(ctx: dict[str, Any]) -> Any:
         for spec in execs:
             item = dict(spec)
             try:
-                r = _docker(
-                    "compose", "-p", spec["repo"], "-f", f"/workspace/{spec['repo']}/.weave/compose.yaml",
-                    "-f", f"/weave/env/{spec['repo']}.override.yaml", "exec", "-T", spec["service"],
-                    "sh", "-c", spec["command"],
-                )
+                cid = _service_container(spec["repo"], spec["service"])
+                r = _docker("exec", cid, "sh", "-c", spec["command"])
                 item["exit"], item["output"] = r.returncode, (r.stdout + r.stderr)[-1000:]
             except Exception as e:
                 item["error"] = f"{type(e).__name__}: {e}"
             results.append(item)
         out["exec"] = results
+    if names := script.get("resolve"):
+        # The sandbox's own resolver (the agent's shell), for `<service>.<repo>` names.
+        import socket
+
+        out["resolve"] = {}
+        for name in names:
+            try:
+                out["resolve"][name] = socket.gethostbyname(name)
+            except OSError as e:
+                out["resolve"][name] = f"error: {e}"
     if script.get("list_containers"):
         r = _docker("ps", "-a", "--format", "{{.Names}}")
         out["containers"] = r.stdout.split() if r.returncode == 0 else {"error": r.stderr.strip()[-300:]}

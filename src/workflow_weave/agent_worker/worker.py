@@ -24,7 +24,8 @@ from .outcomes import (
     DONE_MARK, GAVE_UP_MARK, classify_error, classify_final_reply, last_error_detail, with_agent_words,
 )
 from .environment import (
-    RECIPE_PATH, Environment, EnvironmentBringUpError, LogsNotSaved, RecipeError, parse_recipe,
+    FROM_BASE_BRANCH, FROM_TASK_BRANCH, RECIPE_PATH, Environment, EnvironmentBringUpError, LogsNotSaved, Placement,
+    Recipe, RecipeError, parse_recipe, resolve_environment,
 )
 from .sandbox import WORKDIR, Sandbox, SandboxError, require_runtime, stage_skills, stage_user_files
 from . import standards
@@ -94,6 +95,8 @@ class AgentWorker:
         for repo in request.repos:
             if repo.name not in product.repos:
                 raise ValueError(f"Repo {repo.name!r} is not part of Product {request.product!r}")
+        if request.working_on is not None and request.working_on not in {r.name for r in request.repos}:
+            raise ValueError(f"working_on {request.working_on!r} is not one of the run's Repos")
 
         store = self.settings.subscriptions
         agent = profile.agent_provider
@@ -300,12 +303,8 @@ class AgentWorker:
 
             # The Environment is up and ready before any agent starts (and so before any
             # Subscription use); a failure here ends the run with its reason.
-            for name in with_recipe:
-                environment = Environment(sandbox, name, now=_now)
-                environments.append(environment)
-                self._bring_up(rec, environment, environments)
-                if run.cancel_requested.is_set():
-                    raise _Cancelled
+            if with_recipe:
+                self._bring_up_environment(run, product, sandbox, refs, environments)
 
             agent = ACPAgent(acp_command=profile.acp_command, acp_session_mode=profile.acp_session_mode)
             log = _EventLog(rec.event_log)
@@ -377,19 +376,72 @@ class AgentWorker:
                     raise SandboxError(f"{how} mid-run: {sandbox.last_logs(500)}")
                 next_check = time.monotonic() + SANDBOX_CHECK_INTERVAL
 
-    def _bring_up(self, rec: RunRecord, environment: Environment, environments: list[Environment]) -> None:
-        """Read the Repo's Run recipe from its working copy in the sandbox and bring it up. The run
-        record lists every service that became ready, even when a later one did not."""
-        code, text = environment.sandbox.run(f"cat {shlex.quote(RECIPE_PATH)}", cwd=f"{WORKDIR}/{environment.repo}")
-        if code != 0:
-            raise EnvironmentBringUpError(
-                f"Repo {environment.repo!r}: its Run recipe {RECIPE_PATH} is not in the working copy "
-                f"(it was on the Base branch): {text.strip()[-300:]}"
-            )
+    def _bring_up_environment(
+        self, run: _Run, product: ProductConfig, sandbox: Sandbox, refs: dict[str, str],
+        environments: list[Environment],
+    ) -> None:
+        """Bring up every Repo of the Environment, dependencies first (#50): the touched Repos that
+        have a Run recipe and, from their `depends_on`, the Repos the run does not touch. Each runs
+        from the branch its place in the Story calls for; the run record says which."""
+        rec, request = run.record, run.request
+        touched = {t.name: t for t in request.repos}
+        with_base_recipe = {t.name for t in request.repos if _has_recipe(product.repos[t.name].source, refs[t.name])}
+
+        def base_branch_of(name: str) -> str:
+            return touched[name].base_branch if name in touched else product.repos[name].base_branch
+
+        def load(placement: Placement) -> Recipe | None:
+            name = placement.repo
+            if name not in product.repos:
+                raise RecipeError(f"Repo {name!r} is named in a Run recipe's depends_on but is not part of "
+                                  f"Product {request.product!r}")
+            if placement.source == FROM_BASE_BRANCH:
+                sandbox.put_checkout(
+                    product.repos[name].source, name, self._dependency_base_ref(product, name, placement.branch),
+                    placement.path,
+                )
+            elif placement.source == FROM_TASK_BRANCH:
+                if not sandbox.put_task_branch_checkout(
+                    name, placement.branch, touched[name].base_branch, placement.path
+                ):
+                    self._note(rec, f"Repo {name!r}: no Task branch {placement.branch!r} yet; its Environment "
+                                    f"runs from Base branch {touched[name].base_branch}")
+            code, text = sandbox.run(f"cat {shlex.quote(RECIPE_PATH)}", cwd=placement.path)
+            if code != 0:
+                if name in with_base_recipe:
+                    raise RecipeError(f"Repo {name!r}: its Run recipe {RECIPE_PATH} is not in the {placement.source} "
+                                      f"(it was on the Base branch): {text.strip()[-300:]}")
+                return None
+            return parse_recipe(name, text)
+
         try:
-            recipe = parse_recipe(environment.repo, text)
+            placed = resolve_environment(touched, request.working_repo, base_branch_of, load)
         except RecipeError as e:
             raise EnvironmentBringUpError(str(e)) from e
+        rec.environment_repos = [p.as_record() for p, _ in placed]
+        self._save(rec)
+        for placement, recipe in placed:
+            environment = Environment(sandbox, placement.repo, now=_now, working_copy=placement.path)
+            environments.append(environment)
+            self._bring_up(rec, environment, recipe, environments)
+            if run.cancel_requested.is_set():
+                raise _Cancelled
+
+    def _dependency_base_ref(self, product: ProductConfig, name: str, base_branch: str) -> str:
+        """Where to read the Base branch of a Repo the run does not touch: the Code host's, just
+        fetched into the clone, or the clone's own branch when it has no Code host remote."""
+        repo = product.repos[name]
+        try:
+            remote = git.code_host_remote(repo.source, repo.push_remote)
+            return git.fetch_base(repo.source, remote, base_branch) if remote else f"refs/heads/{base_branch}"
+        except GitError as e:
+            raise GitError(f"Repo {name!r}: {e}") from e
+
+    def _bring_up(
+        self, rec: RunRecord, environment: Environment, recipe: Recipe, environments: list[Environment]
+    ) -> None:
+        """Bring one Repo's recipe up. The run record lists every service that became ready, even
+        when a later one did not."""
         try:
             environment.bring_up(recipe)
         finally:

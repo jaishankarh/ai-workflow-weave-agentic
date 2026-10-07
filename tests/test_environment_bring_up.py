@@ -40,7 +40,14 @@ class FakeSandbox:
 
     def run(self, command, timeout=120, cwd="/workspace"):
         self.commands.append(command)
-        return self.script(command, self)
+        code, out = self.script(command, self)
+        # A script that says nothing about a container lookup gets a running container with an address.
+        if (code, out) == (0, ""):
+            if " ps " in command and " -q " in command:
+                return 0, f"c-{command.split()[-1]}\n"
+            if command.startswith("docker inspect"):
+                return 0, "10.0.0.2\n"
+        return code, out
 
     def put_text(self, path, text):
         self.files[path] = text
@@ -68,10 +75,11 @@ def test_a_repos_recipe_is_brought_up_as_its_own_project_on_the_environment_netw
     ready = environment(sb).bring_up(parse_recipe("svc", RECIPE))
     joined = "\n".join(sb.commands)
     assert "docker network create weave-env" in sb.commands[0]
-    (up,) = [c for c in sb.commands if " up " in c]
-    assert "docker compose -p svc -f /workspace/svc/" + RECIPE_PATH in up
-    assert "-f /weave/env/svc.override.yaml" in up and "up -d" in up
-    assert yaml.safe_load(sb.files["/weave/env/svc.override.yaml"])["services"]["web"]["networks"]
+    create, start = [c for c in sb.commands if " up " in c]  # created, joined to the network (#50), started
+    assert "docker compose -p svc -f /workspace/svc/" + RECIPE_PATH in create
+    assert "-f /weave/env/svc.override.yaml" in create and "--no-start" in create
+    assert "up -d" in start
+    assert yaml.safe_load(sb.files["/weave/env/svc.override.yaml"])["services"]["web"]["labels"]["weave.repo"] == "svc"
     assert "docker-compose.yml" not in joined
     assert [(r.service, r.address) for r in ready] == [("web", "web.svc"), ("db", "db.svc")]
 

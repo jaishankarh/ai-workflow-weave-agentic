@@ -246,6 +246,34 @@ class Sandbox:
         self.sh(f"git checkout -q -B {integration_branch}", cwd=dest)
         self.sh(f"git remote set-url origin {remote_url} && rm -f {remote_bundle}", cwd=dest)
 
+    def put_checkout(self, source: str, name: str, ref: str, dest: str) -> None:
+        """Check out a Repo the run does not work on, read at `ref` in `source`, at `dest`: a Repo
+        pulled in by another recipe's `depends_on` (its Base branch). No remote is kept and nothing
+        can be pushed from it (ADR 0009)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = Path(tmp) / f"{name}.bundle"
+            r = subprocess.run(["git", "-C", source, "bundle", "create", str(bundle), "--all"], capture_output=True, text=True)
+            if r.returncode != 0:
+                raise SandboxError(f"cannot read Repo {name} at {source}: {r.stderr.strip()}")
+            remote_bundle = f"/tmp/weave-repos/{name}.dependency.bundle"
+            self.workspace.file_upload(bundle, remote_bundle)
+        self.sh(f"mkdir -p {shlex.quote(dest)} && git init -q {shlex.quote(dest)}", cwd="/")
+        self.sh(f"git fetch -q {remote_bundle} {shlex.quote(ref)} && git checkout -q --detach FETCH_HEAD && rm -f {remote_bundle}",
+                cwd=dest)
+
+    def put_task_branch_checkout(self, name: str, integration_branch: str, base_branch: str, dest: str) -> bool:
+        """Check out, at `dest`, the Task branch (the Integration branch) of a Repo the Story
+        touches but the run is not working on, apart from the agent's working copy so the agent's
+        edits are not what that Repo runs from. A Story's first Task there has no branch yet: then it
+        is the Base branch, which is what the branch would be. Returns whether the branch was found."""
+        src = f"{WORKDIR}/{name}"
+        branch = shlex.quote(f"refs/remotes/origin/{integration_branch}")
+        found = self.run(f"git rev-parse -q --verify {branch}", cwd=src)[0] == 0
+        ref = branch if found else shlex.quote(f"refs/heads/{base_branch}")
+        self.sh(f"mkdir -p {shlex.quote(dest)} && git init -q {shlex.quote(dest)}", cwd="/")
+        self.sh(f"git fetch -q {shlex.quote(src)} {ref} && git checkout -q --detach FETCH_HEAD", cwd=dest)
+        return found
+
     def processes(self) -> list[str]:
         """Command lines of live processes, apart from the agent-server itself."""
         r = _docker("exec", self.container_id, "ps", "-eo", "pid=,stat=,args=")

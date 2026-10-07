@@ -227,21 +227,33 @@ x-weave:
       interval: 1       # seconds between attempts (default 1)
 ```
 
-`command` is a string (run with `sh -c`) or a list (run as is). A recipe may have no services. The
-other `x-weave` fields of Spec 2 (dependencies, seed, secrets, databases, MCP servers) are not read
-yet.
+`command` is a string (run with `sh -c`) or a list (run as is). A recipe may have no services. It
+may also name the Repos it needs: `x-weave: {depends_on: [svc]}`. The other `x-weave` fields of
+Spec 2 (seed, secrets, databases, MCP servers) are not read yet.
 
 Between staging the agent's files and starting the agent, the worker brings each such Repo's
-recipe up inside the sandbox as its own Compose project (`-p <repo>`, from the Repo's working
-copy), on a shared network `weave-env` where each service has the alias `<service>.<repo>`, and
-waits until every service has passed its readiness check. A service that does not start or does not
+recipe up inside the sandbox as its own Compose project (`-p <repo>`), on a shared network
+`weave-env` where each service has the alias `<service>.<repo>` (and no other: services are created,
+joined to the network with `docker network connect --alias`, then started, because Compose would
+also give each one its bare name there, which two Repos with a `db` would share), and waits until
+every service has passed its readiness check. The same names are added to the sandbox's
+`/etc/hosts`, so the agent's shell resolves them too.
+
+Several Repos share one Environment. Every touched Repo with a recipe is brought up, and so is
+every Repo named in a `depends_on` (transitively), dependencies first; a `depends_on` cycle or a
+dependency without a recipe is refused (`needs-setup`). Each Repo runs from: the agent's working copy
+for the Repo being worked on (`RunRequest.working_on`, default the first of `repos`), its Task branch
+(Integration branch) for another Repo in `repos`, and its Base branch for a Repo the run does not
+touch, so an Environment never holds another Story's unmerged work. The last two run from a
+checkout under `/weave/env/src/<repo>` that the agent does not edit. A service that does not start or does not
 become ready in time ends the run before any agent starts (no Subscription use), as `needs-setup`
 with a reason naming the Repo, the service and its last log lines. (Telling that apart from a
 Story's branches breaking the Environment, `environment-broken`, is #51.) The containers have open
 internet access, and go with the sandbox: nothing is shared between runs.
 
-The run record lists `environment_services` (Repo, service, address, `ready_at`,
-`seconds_to_ready`) and `environment_logs` (each service's log, saved to
+The run record lists `environment_repos` (each Repo in the Environment, with `source`: working
+copy, Task branch or Base branch, its `branch`, and whether the run `touched` it),
+`environment_services` (Repo, service, address, `ready_at`, `seconds_to_ready`) and `environment_logs` (each service's log, saved to
 `<runs_dir>/<run id>/environment/<repo>/<service>.log` before the sandbox is removed).
 
 ### Images

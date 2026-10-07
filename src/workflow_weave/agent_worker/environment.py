@@ -18,6 +18,10 @@ which Compose ignores, so the file also runs with plain `docker compose -f .weav
 `command` is a string (run with `sh -c`) or a list (run as is); exit status 0 means ready. A recipe
 may have no services at all. Other `x-weave` fields (dependencies, seed, secrets, databases, MCP
 servers) belong to later tickets of Spec 2 and are ignored here.
+
+Several Repos (#50): `x-weave.depends_on` lists the Repos this one needs (`depends_on: [svc]`); they
+are brought up first, each as its own Compose project. A recipe may have no services and only
+`depends_on`.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import yaml
 
@@ -39,6 +43,14 @@ WEAVE_KEY = "x-weave"
 NETWORK = "weave-env"
 # Where the generated override lives inside the sandbox (never in a working copy).
 ENV_DIR = "/weave/env"
+# Where a Repo that does not run from the agent's working copy is checked out (Task or Base branch).
+CHECKOUT_DIR = f"{ENV_DIR}/src"
+WORKDIR = "/workspace"
+
+# What a Repo in the Environment runs from.
+FROM_WORKING_COPY = "working copy"
+FROM_TASK_BRANCH = "Task branch"
+FROM_BASE_BRANCH = "Base branch"
 
 DEFAULT_READY_TIMEOUT = 60.0
 DEFAULT_READY_INTERVAL = 1.0
@@ -80,6 +92,7 @@ class Recipe:
     repo: str
     services: tuple[str, ...]
     readiness: dict[str, ReadinessCheck]
+    depends_on: tuple[str, ...] = ()
 
 
 def parse_recipe(repo: str, text: str) -> Recipe:
@@ -114,7 +127,10 @@ def parse_recipe(repo: str, text: str) -> Recipe:
         if service not in checks:
             raise bad(f"has no readiness check for service {service!r} (`{WEAVE_KEY}.readiness.{service}`)")
         readiness[service] = _parse_check(checks[service], service, bad)
-    return Recipe(repo=repo, services=names, readiness=readiness)
+    depends_on = block.get("depends_on") or []
+    if not isinstance(depends_on, list) or not all(isinstance(d, str) and d.strip() for d in depends_on):
+        raise bad(f"has `{WEAVE_KEY}.depends_on` that is not a list of Repo names")
+    return Recipe(repo=repo, services=names, readiness=readiness, depends_on=tuple(depends_on))
 
 
 def _parse_check(raw: Any, service: str, bad: Callable[[str], RecipeError]) -> ReadinessCheck:
@@ -138,15 +154,14 @@ def _parse_check(raw: Any, service: str, bad: Callable[[str], RecipeError]) -> R
 
 
 def compose_override(repo: str, recipe: Recipe) -> str:
-    """The generated compose override: every service joins the Environment network as
-    `<service>.<repo>`, and keeps the recipe's own default network so it behaves as it does
-    under standard tooling."""
-    doc = {
-        "services": {
-            s: {"networks": {NETWORK: {"aliases": [f"{s}.{repo}"]}, "default": {}}} for s in recipe.services
-        },
-        "networks": {NETWORK: {"external": True, "name": NETWORK}},
-    }
+    """The generated compose override: it labels each container with its Repo and service.
+
+    It never names the Environment network. Compose gives a service its bare name (`db`) as an alias
+    on every network it attaches it to, so two Repos with a `db` would both answer to `db` there;
+    each service instead joins the network with `docker network connect --alias <service>.<repo>`
+    (see `Environment.bring_up`), which adds no other name. The recipe's own default network keeps
+    working as with standard tooling."""
+    doc = {"services": {s: {"labels": {"weave.repo": repo, "weave.service": s}} for s in recipe.services}}
     return yaml.safe_dump(doc, sort_keys=False)
 
 
@@ -219,11 +234,20 @@ class Environment:
         )
         self.sandbox.put_text(self._override_file, compose_override(self.repo, recipe))
         started = self._clock()
-        code, out = self.sandbox.run(self._compose("up", "-d", "--build"), timeout=UP_TIMEOUT, cwd="/")
+        # Create (and build) first, join the shared network, then start: a service that reaches a
+        # sibling Repo while starting must already be on that network.
+        code, out = self.sandbox.run(self._compose("up", "--no-start", "--build"), timeout=UP_TIMEOUT, cwd="/")
         if code != 0:
             raise EnvironmentBringUpError(
                 f"Repo {self.repo!r}: its Run recipe's services did not start ({RECIPE_PATH}): {_tail(out)}"
             )
+        containers = {service: self._attach(service) for service in recipe.services}
+        code, out = self.sandbox.run(self._compose("up", "-d", "--no-recreate"), timeout=UP_TIMEOUT, cwd="/")
+        if code != 0:
+            raise EnvironmentBringUpError(
+                f"Repo {self.repo!r}: its Run recipe's services did not start ({RECIPE_PATH}): {_tail(out)}"
+            )
+        self._name_in_sandbox(containers)
         for service in recipe.services:
             check = recipe.readiness[service]
             deadline = started + check.timeout
@@ -243,6 +267,54 @@ class Environment:
                 ServiceReady(self.repo, service, f"{service}.{self.repo}", self._now(), self._clock() - started)
             )
         return self.ready
+
+    def _attach(self, service: str) -> list[str]:
+        """Join each of the service's containers to the Environment network as `<service>.<repo>`
+        and no other name. Returns the container ids."""
+        code, out = self.sandbox.run(self._compose("ps", "-a", "-q", service), cwd="/")
+        ids = out.split() if code == 0 else []
+        if not ids:
+            raise EnvironmentBringUpError(
+                f"Repo {self.repo!r}: service {service!r} has no container to join the Environment network "
+                f"({_tail(out, 300) or 'none were created'})"
+            )
+        for cid in ids:
+            code, out = self.sandbox.run(
+                shlex.join(["docker", "network", "connect", "--alias", f"{service}.{self.repo}", NETWORK, cid]),
+                cwd="/",
+            )
+            if code != 0:
+                raise EnvironmentBringUpError(
+                    f"Repo {self.repo!r}: service {service!r} could not join the Environment network "
+                    f"as {service}.{self.repo}: {_tail(out, 300)}"
+                )
+        return ids
+
+    def _name_in_sandbox(self, containers: dict[str, list[str]]) -> None:
+        """Let the sandbox's own shell (the agent's) resolve `<service>.<repo>` too: Docker's DNS
+        answers only inside the Environment's containers. The address is the same in every run; the
+        IP behind it is that run's."""
+        lines = []
+        for service, ids in containers.items():
+            code, out = self.sandbox.run(
+                shlex.join(["docker", "inspect", "-f",
+                            '{{(index .NetworkSettings.Networks "' + NETWORK + '").IPAddress}}', ids[0]]),
+                cwd="/",
+            )
+            ip = out.strip()
+            if code != 0 or not ip:
+                raise EnvironmentBringUpError(
+                    f"Repo {self.repo!r}: service {service!r} has no address on the Environment network "
+                    f"({_tail(out, 300)})"
+                )
+            lines.append(f"{ip} {service}.{self.repo}")
+        entries = " ".join(shlex.quote(line) for line in lines)
+        code, out = self.sandbox.run(f"printf '%s\\n' {entries} >> /etc/hosts", cwd="/")
+        if code != 0:
+            raise EnvironmentBringUpError(
+                f"Repo {self.repo!r}: its service addresses could not be added to the sandbox's /etc/hosts: "
+                f"{_tail(out, 300)}"
+            )
 
     def _last_log_lines(self, service: str) -> str:
         code, out = self.sandbox.run(
@@ -279,3 +351,74 @@ class Environment:
 def _tail(text: str, chars: int = 800) -> str:
     text = (text or "").strip()
     return text[-chars:] if len(text) > chars else text
+
+
+# ---------------------------------------------------------------- which Repos, in what order, from where
+
+
+@dataclass(frozen=True)
+class Placement:
+    """Where one Repo of the Environment runs from."""
+
+    repo: str
+    source: str  # FROM_WORKING_COPY, FROM_TASK_BRANCH or FROM_BASE_BRANCH
+    branch: str
+    path: str  # the checkout the recipe is read and run from, inside the sandbox
+    touched: bool  # the Story touches it; False: pulled in by another recipe's `depends_on`
+
+    def as_record(self) -> dict:
+        return {"repo": self.repo, "source": self.source, "branch": self.branch, "touched": self.touched}
+
+
+def place(repo: str, touched: Mapping[str, Any], working_on: str, base_branch_of: Callable[[str], str]) -> Placement:
+    """The agent's working copy for the Repo being worked on; the Task branch (the Integration
+    branch) for another Repo the Story touches; the Base branch for any Repo the Story does not
+    touch. An Environment therefore never holds another Story's unmerged work (ADR 0004)."""
+    if repo == working_on:
+        return Placement(repo, FROM_WORKING_COPY, touched[repo].integration_branch, f"{WORKDIR}/{repo}", True)
+    path = f"{CHECKOUT_DIR}/{repo}"
+    if repo in touched:
+        return Placement(repo, FROM_TASK_BRANCH, touched[repo].integration_branch, path, True)
+    return Placement(repo, FROM_BASE_BRANCH, base_branch_of(repo), path, False)
+
+
+def resolve_environment(
+    touched: Mapping[str, Any],
+    working_on: str,
+    base_branch_of: Callable[[str], str],
+    load: Callable[[Placement], Recipe | None],
+) -> list[tuple[Placement, Recipe]]:
+    """The Repos of the Environment with their recipes, dependencies before the Repos that need them.
+
+    `touched` maps each Repo the Story touches to its target (`integration_branch`); `load` makes
+    the Repo's checkout available and returns its Run recipe, or None if it has none. A touched Repo
+    with no recipe is left out; a dependency with none, or a dependency cycle, is a RecipeError.
+    """
+    loaded: dict[str, tuple[Placement, Recipe | None]] = {}
+    ordered: list[tuple[Placement, Recipe]] = []
+    done: set[str] = set()
+
+    def visit(repo: str, path: tuple[str, ...]) -> None:
+        if repo in path:
+            cycle = " -> ".join((*path[path.index(repo):], repo))
+            raise RecipeError(f"Repo {repo!r}: the Run recipes' depends_on form a cycle: {cycle}")
+        if repo in done:
+            return
+        if repo not in loaded:
+            placement = place(repo, touched, working_on, base_branch_of)
+            loaded[repo] = (placement, load(placement))
+        placement, recipe = loaded[repo]
+        if recipe is None:
+            if path:
+                raise RecipeError(
+                    f"Repo {repo!r}: Repo {path[-1]!r} depends on it, but it has no Run recipe ({RECIPE_PATH})"
+                )
+            return  # a touched Repo without a recipe simply is not in the Environment
+        for dependency in recipe.depends_on:
+            visit(dependency, (*path, repo))
+        done.add(repo)
+        ordered.append((placement, recipe))
+
+    for repo in touched:
+        visit(repo, ())
+    return ordered

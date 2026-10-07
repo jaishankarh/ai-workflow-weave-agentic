@@ -85,9 +85,12 @@ def test_a_developers_own_compose_file_is_never_used():
 
 
 def test_each_service_is_reachable_by_its_service_name_and_repo_name_on_the_environment_network():
+    # The address `<service>.<repo>` is given by `docker network connect --alias` (#50, tested in
+    # test_environment_several_repos.py), because declaring the network to Compose would also give
+    # every service its bare name there. So the override leaves networks alone: the recipe's own
+    # network keeps working as with standard tooling.
     override = yaml.safe_load(compose_override("svc", parse_recipe("svc", SERVICE_RECIPE)))
-    assert override["networks"]["weave-env"] == {"external": True, "name": "weave-env"}
+    assert "networks" not in override
     for service in ("web", "db"):
-        nets = override["services"][service]["networks"]
-        assert nets["weave-env"] == {"aliases": [f"{service}.svc"]}
-        assert "default" in nets  # the recipe's own network keeps working as with standard tooling
+        assert "networks" not in override["services"][service]
+        assert override["services"][service]["labels"] == {"weave.repo": "svc", "weave.service": service}
