@@ -78,6 +78,10 @@ _Avoid:_ "base image" (sounds like the Base branch, and like a Dockerfile's FROM
 A committed script that adds synthetic test data to a database, run at most once per database and recorded there, as a migration is. An Environment runs only the Seed scripts its Run image does not already contain. Never edited once it has run; a change is a new Seed script.
 _Avoid:_ "fixtures" (also names in-test data), "seed" alone for the whole dataset.
 
+## Test secrets
+A Product's set of credentials for test accounts and sandboxes of outside services (e.g. a Korona test business), never for staging or production. Kept on the Sandbox host outside every repo. A run gets only the secrets its Run recipes name, never the whole set; a named secret the set lacks stops the run as needing setup.
+_Avoid:_ "proof secrets" (they serve every run kind, not only proofs), "sandbox secrets" ("sandbox" alone names the agent's workspace).
+
 ## Base branch
 The branch of a Repo that an Environment uses when the Story has no Task in that Repo (e.g. `dev`). Configured per Repo.
 
@@ -169,7 +173,7 @@ _Avoid:_ "plugins", "tools" alone (both also name an agent's built-in abilities)
 An MCP server for one database in a run's Environment: one per database, started for that run, wired to that database before the agent starts, and gone when the run ends. Exists only for a database the Run recipe names and whose kind the Product enables; full read-write, since the data is the run's own.
 
 ## External MCP server
-An MCP server a Repo's Run recipe declares for something outside the Environment, defined the same for every run; each run starts its own copy. Reaches outside systems only with credentials from the Product's sandbox-only secrets, so never staging or production, and never the Product's Tracker or Code host.
+An MCP server a Repo's Run recipe declares for something outside the Environment, defined the same for every run; each run starts its own copy. Reaches outside systems only with credentials from the Product's **Test secrets**, so never staging or production, and never the Product's Tracker or Code host.
 
 When a Repo's own skill shares a name with a central skill, the central skill is used unless a **Skill override** says otherwise. Every such clash is reported in the run's log.
 
