@@ -17,6 +17,13 @@ RUN apt-get update \
       ca-certificates git python3 python3-venv python3-pip curl procps tar \
  && rm -rf /var/lib/apt/lists/*
 
+# Docker engine and Compose, for sandboxes started on the sysbox runtime (ADR 0004): the
+# entrypoint starts the engine only when WEAVE_START_DOCKERD=1, so other sandboxes never run it.
+# From the Ubuntu archive, so the version is the base image's, not a moving repository.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends docker.io docker-compose-v2 iptables \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN python3 -m venv /opt/oh \
  && /opt/oh/bin/pip install --no-cache-dir -q \
       openhands-agent-server==${OPENHANDS_VERSION} \
@@ -35,5 +42,7 @@ RUN git config --system user.name "weave agent" \
  && git config --system init.defaultBranch main \
  && mkdir -p /workspace
 
+COPY entrypoint.sh /usr/local/bin/weave-sandbox-entrypoint
+
 WORKDIR /workspace
-ENTRYPOINT ["/opt/oh/bin/python", "-m", "openhands.agent_server"]
+ENTRYPOINT ["/usr/local/bin/weave-sandbox-entrypoint"]

@@ -47,7 +47,7 @@ codes; the table is `AgentProfile.error_kinds` (default: claude-agent-acp's).
 | Agent finished with `RUN-OUTCOME: gave-up: <why>` or no marker, or OpenHands stopped it as stuck with no error | `agent-gave-up` |
 | Agent error `errorKind` `authentication_failed`, or ACP code -32000 (claude-agent-acp's "Authentication required", e.g. for a rejected Claude Code token) | `needs-setup` |
 | Agent error `errorKind` `rate_limit` / `billing_error` | `quota-exhausted` |
-| Any other agent error, a sandbox that fails to start or dies mid-run, unreachable Central skills | `infra-failure` |
+| Any other agent error, a sandbox that fails to start or dies mid-run, unreachable Central skills, a Sandbox host without the `sandbox_runtime` the worker is set to (checked before anything starts) | `infra-failure` |
 
 `ACP_PROMPT_MAX_RETRIES=0` is set in every sandbox, so a rejected credential
 surfaces in seconds; infrastructure retries are the caller's. When the error
@@ -193,9 +193,21 @@ and, for larger Repos, a persistent mirror per Repo instead of a fresh clone
 per run. The gateway must listen only where sandboxes can reach it (the bridge
 gateway, not `0.0.0.0`).
 
+### Sandboxes on sysbox
+
+`WorkerSettings.sandbox_runtime="sysbox-runc"` starts every sandbox with `docker run --runtime
+sysbox-runc` (never `--privileged`, never the host's Docker socket; ADR 0004), and the image's
+entrypoint then starts a Docker engine inside it (`WEAVE_START_DOCKERD=1`), so software runs in
+containers inside the sandbox. The default, `None`, keeps the host's default runtime and starts no
+engine. A Sandbox host whose Docker does not list the runtime fails the run as `infra-failure`
+naming it, before a sandbox is started. Teardown waits until the sandbox is gone from the Sandbox
+host (polling `docker inspect`, up to 60 s) before the run is reported ended; if it is not gone,
+that is noted in `run.log`. Tests that need sysbox are skipped on a host without it.
+
 ### Images
 
-- `sandbox/Dockerfile`: the base sandbox image (agent-server, git, Python).
+- `sandbox/Dockerfile`: the base sandbox image (agent-server, git, Python, and a Docker engine
+  with Compose that starts only in a sandbox run on sysbox; see "Sandboxes on sysbox").
   Its base image is the build ARG `BASE_IMAGE` (default `ubuntu:24.04`).
 - `sandbox/claude-code/Dockerfile`: the Claude Code Agent profile's image, on
   top of the sandbox image (build ARG `SANDBOX_IMAGE`). It pins Node.js

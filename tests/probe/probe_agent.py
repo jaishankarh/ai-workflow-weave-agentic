@@ -356,6 +356,49 @@ def report_actions(ctx: dict[str, Any]) -> Any:
     return ctx.get("actions", [])
 
 
+def _docker(*args: str, timeout: float = 240) -> subprocess.CompletedProcess:
+    return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+
+
+def report_container(ctx: dict[str, Any]) -> Any:
+    """Start a container inside the sandbox's own Docker engine, stop it, and say what happened.
+
+    Script key ``run_container``: ``{"image": ..., "leave_running": bool}``. One container prints a
+    line; another is started with ``sleep`` and stopped (unless ``leave_running``).
+    """
+    spec = ctx["script"].get("run_container")
+    if not spec:
+        return None
+    image = spec["image"]
+    result: dict[str, Any] = {"image": image, "started": False, "stopped": False}
+    try:
+        ran = _docker("run", "--rm", image, "echo", "hello from inside the sandbox")
+        result["output"] = ran.stdout
+        if ran.returncode != 0:
+            result["error"] = ran.stderr.strip()[-500:]
+            return result
+        sleeper = _docker("run", "-d", image, "sleep", "300")
+        if sleeper.returncode != 0:
+            result["error"] = sleeper.stderr.strip()[-500:]
+            return result
+        cid = sleeper.stdout.strip()
+        result["started"] = _docker("inspect", "-f", "{{.State.Running}}", cid).stdout.strip() == "true"
+        if spec.get("leave_running"):
+            return result
+        _docker("stop", "-t", "1", cid)
+        result["stopped"] = _docker("inspect", "-f", "{{.State.Running}}", cid).stdout.strip() == "false"
+        _docker("rm", "-f", cid)
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def report_docker_socket_mounts(ctx: dict[str, Any]) -> Any:
+    """Mounts of a docker.sock into this sandbox from the Sandbox host. The nested engine's own
+    socket is a file it creates, not a mount, so a healthy sandbox reports none."""
+    return [line for line in Path("/proc/self/mountinfo").read_text().splitlines() if "docker.sock" in line]
+
+
 REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "earlier_run_markers": report_earlier_run,
     "env_names": report_env_names,
@@ -372,6 +415,8 @@ REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "git_credentials": report_git_credentials,
     "actions": report_actions,
     "always_on": report_always_on,
+    "container": report_container,
+    "docker_socket_mounts": report_docker_socket_mounts,
 }
 
 

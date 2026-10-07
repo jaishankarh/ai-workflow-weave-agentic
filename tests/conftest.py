@@ -49,6 +49,26 @@ PRODUCT = "probe-product"
 PROBE_SUBSCRIPTION = "probe-subscription"
 
 
+def sysbox_available() -> bool:
+    """True when the Sandbox host's Docker lists the sysbox runtime. Never raises: no Docker CLI,
+    no daemon or an unreadable answer all mean "not available"."""
+    try:
+        out = subprocess.run(
+            ["docker", "info", "--format", "{{json .Runtimes}}"], capture_output=True, text=True, timeout=30
+        )
+        return out.returncode == 0 and "sysbox-runc" in json.loads(out.stdout or "{}")
+    except Exception:
+        return False
+
+
+# Tests that run a real sandbox on sysbox (nested Docker). Evaluated at collection, before any
+# image fixture is set up, so on a host without sysbox they skip instead of erroring.
+needs_sysbox = pytest.mark.skipif(
+    not sysbox_available(),
+    reason="needs a Linux Sandbox host with the sysbox runtime (`docker info` must list sysbox-runc)",
+)
+
+
 def _docker_build(tag: str, context: Path, build_args: dict[str, str]) -> None:
     cmd = ["docker", "build", "-q", "-t", tag]
     if net := os.environ.get("WEAVE_TEST_BUILD_NETWORK"):
@@ -213,6 +233,7 @@ def make_worker(
         product_yaml: str | None = None,
         central_skills_location: Path | None = None,
         agent_profiles: dict[str, AgentProfile] | None = None,
+        sandbox_runtime: str | None = None,
     ) -> AgentWorker:
         if central_skills_location is None:
             # This repo's Central skills, plus a coding-standards file for each test Product.
@@ -230,6 +251,7 @@ def make_worker(
             subscriptions=subscriptions or load_subscription_store(default_store),
             sandbox_nofile_limit=_nofile_limit(),
             central_skills_location=central_skills_location,
+            sandbox_runtime=sandbox_runtime,
         )
         return AgentWorker(settings)
 

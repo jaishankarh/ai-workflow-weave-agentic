@@ -8,6 +8,7 @@ and so the open-files limit is a setting, then talk to it through the SDK's
 
 from __future__ import annotations
 
+import json
 import secrets
 import shlex
 import socket
@@ -15,6 +16,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import Callable
 from urllib.request import urlopen
 
 from openhands.sdk.workspace import RemoteWorkspace
@@ -24,8 +26,21 @@ LABEL_RUN_ID = "weave.run-id"
 LABEL_PRODUCT = "weave.product"
 
 
+# The runtime that lets a sandbox run its own Docker engine without the host's socket and without
+# --privileged (ADR 0004). The sandbox's entrypoint starts the engine when this env var is set.
+SYSBOX_RUNTIME = "sysbox-runc"
+START_DOCKERD_ENV = "WEAVE_START_DOCKERD"
+# How long teardown waits for the Sandbox host to finish removing a sandbox.
+REMOVAL_TIMEOUT = 60.0
+REMOVAL_POLL_INTERVAL = 0.5
+
+
 class SandboxError(RuntimeError):
     pass
+
+
+class MissingRuntimeError(SandboxError):
+    """The Sandbox host cannot start sandboxes on the runtime they need."""
 
 
 def _free_port() -> int:
@@ -36,6 +51,104 @@ def _free_port() -> int:
 
 def _docker(*args: str, timeout: float = 120) -> subprocess.CompletedProcess:
     return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+
+
+def require_runtime(runtime: str, docker: Callable[..., subprocess.CompletedProcess] = _docker) -> None:
+    """Raise MissingRuntimeError, naming `runtime`, unless the Sandbox host's Docker lists it.
+
+    Asked before a sandbox is started, so a host without sysbox fails the run plainly (an
+    infra-failure) rather than as a puzzling `docker run` error.
+    """
+    fix = f"install the {runtime} runtime on the Sandbox host and register it with Docker"
+    try:
+        r = docker("info", "--format", "{{json .Runtimes}}", timeout=30)
+    except Exception as e:
+        raise MissingRuntimeError(f"cannot check the Sandbox host for the {runtime} runtime: {type(e).__name__}: {e}") from e
+    if r.returncode != 0:
+        raise MissingRuntimeError(
+            f"cannot check the Sandbox host for the {runtime} runtime: {(r.stderr or r.stdout).strip()[-500:]}"
+        )
+    try:
+        runtimes = json.loads(r.stdout or "{}")
+    except ValueError as e:
+        raise MissingRuntimeError(f"cannot read the Sandbox host's Docker runtimes for {runtime}: {r.stdout[:200]!r}") from e
+    if runtime not in runtimes:
+        raise MissingRuntimeError(
+            f"the Sandbox host has no {runtime} runtime (Docker lists: {sorted(runtimes) or 'none'}); {fix}"
+        )
+
+
+def sandbox_run_command(
+    *,
+    image: str,
+    run_id: str,
+    product: str,
+    api_key: str,
+    port: int,
+    env: dict[str, str],
+    nofile_limit: int | None,
+    mounts: list[tuple[str, str]],
+    extra_hosts: list[str],
+    runtime: str | None,
+) -> list[str]:
+    """The `docker run` arguments (after `docker`) that start a sandbox.
+
+    With a `runtime` (sysbox) the sandbox also starts its own Docker engine. Never `--privileged`
+    and never the host's Docker socket (ADR 0004): the runtime is what makes that safe.
+    """
+    cmd = [
+        # No --rm: a sandbox that dies keeps its logs for the run's reason; destroy() removes it.
+        "run", "-d",
+        "--name", f"weave-run-{run_id}",
+        "--label", f"{LABEL_RUN_ID}={run_id}",
+        "--label", f"{LABEL_PRODUCT}={product}",
+        "-p", f"127.0.0.1:{port}:8000",
+        "-e", f"OH_SESSION_API_KEYS_0={api_key}",
+    ]
+    if runtime:
+        cmd += ["--runtime", runtime, "-e", f"{START_DOCKERD_ENV}=1"]
+    if nofile_limit:
+        cmd += ["--ulimit", f"nofile={nofile_limit}:{nofile_limit}"]
+    for host_path, sandbox_path in mounts:
+        cmd += ["--mount", f"type=bind,source={host_path},target={sandbox_path},readonly"]
+    for h in extra_hosts:
+        cmd += ["--add-host", h]
+    for k, v in env.items():
+        cmd += ["-e", f"{k}={v}"]
+    cmd += [image, "--host", "0.0.0.0", "--port", "8000"]
+    return cmd
+
+
+def remove_sandbox(
+    container_id: str,
+    *,
+    timeout: float = REMOVAL_TIMEOUT,
+    interval: float = REMOVAL_POLL_INTERVAL,
+    docker: Callable[..., subprocess.CompletedProcess] = _docker,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Remove a sandbox and return only once the Sandbox host no longer has it.
+
+    `docker rm -f` can return before a sysbox container (and the engine inside it) is fully gone,
+    so teardown polls until `docker inspect` says there is no such container. A Docker that cannot
+    answer is not taken as "gone".
+    """
+    r = docker("rm", "-f", container_id, timeout=60)
+    if r.returncode != 0:
+        raise SandboxError(f"cannot remove sandbox {container_id}: {r.stderr.strip()}")
+    deadline = clock() + timeout
+    last = "still present"
+    while True:
+        r = docker("inspect", container_id, timeout=30)
+        if r.returncode != 0 and "no such" in (r.stderr or "").lower():
+            return
+        last = "still present" if r.returncode == 0 else f"Docker could not answer: {(r.stderr or '').strip()[-200:]}"
+        if clock() >= deadline:
+            raise SandboxError(
+                f"sandbox {container_id} is still on the Sandbox host {timeout:.0f}s after its removal was asked for ({last})"
+            )
+        sleep(interval)
 
 
 class Sandbox:
@@ -50,29 +163,17 @@ class Sandbox:
         start_timeout: float,
         mounts: list[tuple[str, str]] = (),
         extra_hosts: list[str] = (),
+        runtime: str | None = None,
     ) -> None:
-        """`mounts` are (host path, sandbox path) pairs, mounted read-only."""
+        """`mounts` are (host path, sandbox path) pairs, mounted read-only. `runtime` (sysbox)
+        gives the sandbox its own Docker engine; None leaves the default runtime, unchanged."""
         self.run_id = run_id
         self._api_key = secrets.token_urlsafe(24)
         port = _free_port()
-        cmd = [
-            # No --rm: a sandbox that dies keeps its logs for the run's reason; destroy() removes it.
-            "run", "-d",
-            "--name", f"weave-run-{run_id}",
-            "--label", f"{LABEL_RUN_ID}={run_id}",
-            "--label", f"{LABEL_PRODUCT}={product}",
-            "-p", f"127.0.0.1:{port}:8000",
-            "-e", f"OH_SESSION_API_KEYS_0={self._api_key}",
-        ]
-        if nofile_limit:
-            cmd += ["--ulimit", f"nofile={nofile_limit}:{nofile_limit}"]
-        for host_path, sandbox_path in mounts:
-            cmd += ["--mount", f"type=bind,source={host_path},target={sandbox_path},readonly"]
-        for h in extra_hosts:
-            cmd += ["--add-host", h]
-        for k, v in env.items():
-            cmd += ["-e", f"{k}={v}"]
-        cmd += [image, "--host", "0.0.0.0", "--port", "8000"]
+        cmd = sandbox_run_command(
+            image=image, run_id=run_id, product=product, api_key=self._api_key, port=port, env=env,
+            nofile_limit=nofile_limit, mounts=list(mounts), extra_hosts=list(extra_hosts), runtime=runtime,
+        )
         proc = _docker(*cmd)
         if proc.returncode != 0:
             raise SandboxError(f"sandbox failed to start: {proc.stderr.strip()}")
@@ -161,9 +262,8 @@ class Sandbox:
         return (logs.stdout + logs.stderr).strip()[-chars:]
 
     def destroy(self) -> None:
-        r = _docker("rm", "-f", self.container_id, timeout=60)
-        if r.returncode != 0:
-            raise SandboxError(f"cannot remove sandbox {self.container_id}: {r.stderr.strip()}")
+        """Remove the sandbox; returns only once it is gone from the Sandbox host."""
+        remove_sandbox(self.container_id)
 
 
 # For Claude Code (and the probe), the agent's user-level skills folder.

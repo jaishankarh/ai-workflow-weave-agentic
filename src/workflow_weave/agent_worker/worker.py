@@ -22,7 +22,7 @@ from .model import NeedsSetup, NoCapacity, Outcome, RunRecord, RunRequest, RunSt
 from .outcomes import (
     DONE_MARK, GAVE_UP_MARK, classify_error, classify_final_reply, last_error_detail, with_agent_words,
 )
-from .sandbox import WORKDIR, Sandbox, SandboxError, stage_skills, stage_user_files
+from .sandbox import WORKDIR, Sandbox, SandboxError, require_runtime, stage_skills, stage_user_files
 from . import standards
 from .subscriptions import Lease
 from . import local_tickets
@@ -222,6 +222,9 @@ class AgentWorker:
             RunState.ENDED, Outcome.INFRA_FAILURE, "the run stopped before it could report how it ended",
         )
         try:
+            if self.settings.sandbox_runtime:
+                # Before anything is prepared or started: a host without the runtime is an infra-failure.
+                require_runtime(self.settings.sandbox_runtime)
             code_hosts = _code_host_remotes(run.request, product)
             refs = _base_refs(run.request, product, code_hosts, strict=True)
             for t in run.request.repos:
@@ -262,6 +265,7 @@ class AgentWorker:
                 # Read-only, so the agent cannot change the originals (ADR 0009).
                 mounts=[(str(originals.resolve()), local_tickets.ORIGINALS_DIR)],
                 extra_hosts=[f"{GATEWAY_HOST}:host-gateway"],
+                runtime=self.settings.sandbox_runtime,
             )
             sandbox.sh(local_tickets.MAKE_TRACKER, cwd="/")
             for target in run.request.repos:
