@@ -66,6 +66,8 @@ def central(tmp_path: Path) -> Path:
         "upstream/in-progress/wip/SKILL.md": skill_md("wip", "unfinished upstream skill"),
         "ours/shared/SKILL.md": skill_md("shared", "our shared"),
         "ours/review/SKILL.md": skill_md("review", "our review"),
+        # Every Repo here uses the default `central` Coding standards (#41).
+        f"products/{PRODUCT}/coding-standards.md": "# Coding standards\n",
     })
     make_repo_from(loc.parent)
     return loc

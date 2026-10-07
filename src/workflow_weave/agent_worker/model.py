@@ -76,8 +76,8 @@ class NoCapacity:
 @dataclass(frozen=True)
 class NeedsSetup:
     """`start` refused the run before starting a sandbox: something a human must
-    set up is missing (a Repo's `CONTEXT.md`, the Product's Subscription for the
-    agent). Its outcome is `needs-setup`; `reason` names what to fix."""
+    set up is missing (a Repo's `CONTEXT.md`, a selected Coding standards file,
+    the Product's Subscription for the agent). Its outcome is `needs-setup`; `reason` names what to fix."""
 
     reason: str
 
@@ -138,6 +138,10 @@ class RunRecord:
     # Local tickets the agent marked done (`spec`, `01`, `02`, ... in task order), read back
     # from its tracker copy when the run ended (ADR 0009). None if they could not be read.
     tickets_done: list[str] | None = None
+    # The always-on file staged at user level, and each Repo's resolved Coding standards
+    # (where each file was read from).
+    always_on_file: str | None = None
+    coding_standards: dict[str, list[str]] | None = None
 
     def status(self) -> RunStatus:
         return RunStatus(self.run_id, self.state, self.outcome, self.reason)

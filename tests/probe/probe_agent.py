@@ -16,6 +16,8 @@ claude-agent-acp, Cursor's `agent acp`). On each prompt it:
    - ``{"end": "hang", "command": "sleep 600"}``  runs a command that never
      finishes and waits on it. Like Claude Code, an ACP ``session/cancel``
      (an interrupt) does NOT stop the command; only closing the agent does.
+   - ``{"edit": {"<path>": "<text>"}}`` (with any end) first changes a file in the
+     first working copy, uncommitted
    - ``{"end": "error", "errorKind": "rate_limit", "message": "..."}``  fails
      the prompt the way claude-agent-acp fails a turn: a JSON-RPC internal
      error (-32603, which the SDK retries unless ``ACP_PROMPT_MAX_RETRIES``
@@ -229,6 +231,13 @@ def mark_done(prompt_text: str, ticket: str) -> dict[str, Any]:
     return {"action": "mark_done", "ticket": ticket, "ok": True}
 
 
+def edit(rel: str, text: str) -> dict[str, Any]:
+    """Change a file in the first working copy (left uncommitted)."""
+    repo = next(d for d in sorted(WORKSPACE.iterdir()) if (d / ".git").exists())
+    (repo / rel).write_text(text)
+    return {"action": "edit", "path": rel, "ok": True}
+
+
 def push(branch: str) -> dict[str, Any]:
     """Commit in the first working copy and push HEAD to `branch` on its remote."""
     repo = next(d for d in sorted(WORKSPACE.iterdir()) if (d / ".git").exists())
@@ -288,6 +297,8 @@ def code_host_write(write: str) -> dict[str, Any]:
 def run_actions(script: dict[str, Any], prompt_text: str) -> list[dict[str, Any]]:
     """Do what the script asks before reporting; each action's result goes in the report."""
     results = []
+    for rel, text in (script.get("edit") or {}).items():
+        results.append(_attempt(lambda: edit(rel, text), {"action": "edit", "path": rel}))
     for ticket in script.get("mark_done", []):
         results.append(_attempt(lambda: mark_done(prompt_text, ticket), {"action": "mark_done", "ticket": ticket}))
     for branch in script.get("push", []):
@@ -313,6 +324,23 @@ def report_git_credentials(ctx: dict[str, Any]) -> Any:
     return {"helpers": r.stdout.split(), "files": [str(p) for p in candidates if p.exists()]}
 
 
+USER_ALWAYS_ON = Path.home() / ".claude" / "CLAUDE.md"
+_POINTED_PATH = re.compile(r"`(/[^`]+)`")
+
+
+def report_always_on(ctx: dict[str, Any]) -> Any:
+    """The always-on file at the agent's user level, and every absolute path it names in
+    backticks: path -> the file's content (None if there is no such file)."""
+    if not USER_ALWAYS_ON.is_file():
+        return None
+    content = USER_ALWAYS_ON.read_text()
+    pointed = {}
+    for path in dict.fromkeys(_POINTED_PATH.findall(content)):
+        p = Path(path)
+        pointed[path] = p.read_text() if p.is_file() else None
+    return {"path": str(USER_ALWAYS_ON), "content": content, "pointed": pointed}
+
+
 def report_actions(ctx: dict[str, Any]) -> Any:
     """Results of the actions the script asked for (done before the report)."""
     return ctx.get("actions", [])
@@ -332,6 +360,7 @@ REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "local_tickets": report_local_tickets,
     "git_credentials": report_git_credentials,
     "actions": report_actions,
+    "always_on": report_always_on,
 }
 
 
