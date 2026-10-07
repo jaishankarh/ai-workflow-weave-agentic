@@ -46,6 +46,8 @@ from pathlib import Path
 
 from workflow_weave.central_skills import SKILL_FILE, CentralSkills, Skill
 
+from .git import has_commit
+
 REPO_SKILLS_DIR = ".claude/skills"
 _SKILL_TOOL_LINE = re.compile(r"Skill tool", re.IGNORECASE)
 _NAMED = re.compile(r"`/?([A-Za-z0-9_-]+)`|\"/?([A-Za-z0-9_-]+)\"")
@@ -73,9 +75,13 @@ class RepoSkills:
     own: dict[str, str]
 
 
-def read_repo_skills(repo: str, source: str, base_branch: str, overrides: frozenset[str]) -> RepoSkills:
+def read_repo_skills(
+    repo: str, source: str, base_branch: str, overrides: frozenset[str], ref: str | None = None
+) -> RepoSkills:
+    """The Repo's own skills on its Base branch, read at `ref` (default: the local branch)."""
+    ref = ref or base_branch
     r = subprocess.run(
-        ["git", "-C", source, "ls-tree", f"{base_branch}:{REPO_SKILLS_DIR}"],
+        ["git", "-C", source, "ls-tree", f"{ref}:{REPO_SKILLS_DIR}"],
         capture_output=True, text=True,
     )
     own: dict[str, str] = {}
@@ -87,9 +93,7 @@ def read_repo_skills(repo: str, source: str, base_branch: str, overrides: frozen
                 own[name] = tree
     else:
         # No `.claude/skills` on the Base branch is normal; an unreadable Repo is not.
-        ok = subprocess.run(["git", "-C", source, "rev-parse", "--verify", "-q", f"{base_branch}^{{commit}}"],
-                            capture_output=True)
-        if ok.returncode != 0:
+        if not has_commit(source, ref):
             raise StagingError(f"cannot read Repo {repo}'s Base branch {base_branch!r} at {source}")
     return RepoSkills(repo, overrides, own)
 

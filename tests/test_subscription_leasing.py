@@ -7,13 +7,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import probe_reports, probe_request, wait_until_ended
+from conftest import probe_reports, probe_request, sandboxes_of, wait_until_ended
 
-from workflow_weave.agent_worker import AgentWorker, NoCapacity, Outcome, Started, load_subscription_store
+from workflow_weave.agent_worker import (
+    AgentWorker, NoCapacity, Outcome, RunState, Started, load_subscription_store,
+)
 
 STORE = """
 subscriptions:
@@ -132,6 +137,35 @@ def test_a_lease_is_released_after_cancel(worker):
     assert isinstance(worker.start(probe_request(HANG, product="product-a")), NoCapacity)
     assert worker.cancel(started.run_id).is_cancelled
     _second_start_succeeds(worker)
+
+
+def test_a_lease_is_released_and_the_run_ends_even_when_its_sandbox_teardown_fails(
+    worker, tmp_path, monkeypatch
+):
+    # The Sandbox host's docker refuses to remove containers (e.g. a wedged daemon).
+    real_docker = shutil.which("docker")
+    shim = tmp_path / "failing-docker"
+    shim.mkdir()
+    (shim / "docker").write_text(
+        f'#!/bin/sh\nif [ "$1" = rm ]; then echo "weave-test: cannot remove the sandbox" >&2; exit 1; fi\n'
+        f'exec {real_docker} "$@"\n'
+    )
+    (shim / "docker").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
+    started = worker.start(probe_request({"end": "succeed"}, product="product-a"))
+    try:
+        final = wait_until_ended(worker, started.run_id)
+        monkeypatch.undo()
+
+        assert final.outcome is Outcome.SUCCEEDED, final.reason
+        assert worker.record(started.run_id).state is RunState.ENDED  # the record was saved
+        run_log = (worker.settings.runs_dir / started.run_id / "run.log").read_text()
+        assert "weave-test: cannot remove the sandbox" in run_log  # the failure is noted
+        _second_start_succeeds(worker)
+    finally:
+        monkeypatch.undo()
+        if leftover := sandboxes_of(started.run_id):
+            subprocess.run([real_docker, "rm", "-f", *leftover], capture_output=True)
 
 
 def _fingerprint(value: str) -> str:

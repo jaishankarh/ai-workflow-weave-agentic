@@ -127,6 +127,33 @@ def make_repo(path: Path, files: dict[str, str], branch: str = "main") -> Path:
     return path
 
 
+def _git(*args: str) -> str:
+    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def make_code_host(root: Path, files: dict[str, str]) -> tuple[Path, Path]:
+    """A bare repo acting as the Code host, and the Sandbox host's clone of it (remote `origin`)."""
+    seed = make_repo(root / "seed", files)
+    code_host = root / "code-host" / "app.git"
+    _git("clone", "-q", "--bare", str(seed), str(code_host))
+    clone = root / "sandbox-host" / "app"
+    _git("clone", "-q", str(code_host), str(clone))
+    return code_host, clone
+
+
+def commit_on_code_host(code_host: Path, files: dict[str, str], branch: str = "main") -> str:
+    """Someone else lands a commit on the Code host's branch; returns its commit."""
+    work = code_host.parent / f"elsewhere-{len(list(code_host.parent.iterdir()))}"
+    _git("clone", "-q", "--branch", branch, str(code_host), str(work))
+    for rel, body in files.items():
+        (work / rel).parent.mkdir(parents=True, exist_ok=True)
+        (work / rel).write_text(body)
+    _git("-C", str(work), "add", "-A")
+    _git("-C", str(work), "-c", "user.email=else@weave.invalid", "-c", "user.name=else", "commit", "-qm", "later")
+    _git("-C", str(work), "push", "-q", "origin", branch)
+    return _git("-C", str(work), "rev-parse", "HEAD")
+
+
 @pytest.fixture
 def onboarded_repo(tmp_path: Path) -> Path:
     """A small Repo that has been onboarded (it has a CONTEXT.md)."""

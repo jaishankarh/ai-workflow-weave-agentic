@@ -214,6 +214,22 @@ def _event_times(event_log: Path, kind: str):
     return times
 
 
+# --------------------------------------------------------------------------- the agent's final reply
+
+
+def test_a_done_marker_on_any_line_of_the_final_reply_is_succeeded(worker):
+    _, final = _run(worker, {"end": "reply", "text": "All Tasks done.\n   RUN-OUTCOME: done  \n\nThe branch is pushed.\n"})
+
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+
+
+def test_a_final_reply_with_no_marker_is_agent_gave_up_with_a_reason_saying_so(worker):
+    _, final = _run(worker, {"end": "reply", "text": "I changed some files.\nRUN-OUTCOME: maybe\n"})
+
+    assert final.outcome is Outcome.AGENT_GAVE_UP
+    assert "without reporting" in final.reason
+
+
 # --------------------------------------------------------------------------- the sandbox
 
 

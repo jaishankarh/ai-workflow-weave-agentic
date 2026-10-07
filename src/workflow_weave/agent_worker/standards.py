@@ -10,7 +10,8 @@ selects them:
 
 A rules file is a path in the Repo: a file, or a folder whose files all count. It is
 always read as it stands on the Repo's **Base branch** (`git show <base>:<path>` on
-the Sandbox host), never from the working branch or the agent's working copy, so a
+the Sandbox host; when the clone has a Code host remote, the Base branch just fetched
+from it), never from the working branch or the agent's working copy, so a
 run cannot relax a rule in the change that breaks it. A selected file that does not
 exist refuses the run as `needs-setup`.
 
@@ -31,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ProductConfig, RepoConfig
+from .git import has_commit
 
 # Under the Central skills location; one file per Product.
 PRODUCT_STANDARDS = "products/{product}/coding-standards.md"
@@ -105,27 +107,32 @@ def product_standards_path(central_location: Path, product: str) -> Path:
     return central_location / PRODUCT_STANDARDS.format(product=product)
 
 
-def missing(product: ProductConfig, targets: list[tuple[str, str]], central_location: Path | None) -> list[str]:
+# (Repo, Base branch, the ref the Base branch is read at: the branch itself, or the
+# Code host's Base branch as just fetched into the clone).
+Target = tuple[str, str, str]
+
+
+def missing(product: ProductConfig, targets: list[Target], central_location: Path | None) -> list[str]:
     """Each selected Coding standards file that does not exist, described for a human.
 
-    `targets` are (Repo, Base branch) pairs. A Repo or Base branch that cannot be
+    `targets` are (Repo, Base branch, ref) triples. A Repo or Base branch that cannot be
     read at all, or a Central skills location that is unreachable, is left for the
     run to report as an infra-failure, not counted here.
     """
     problems: list[str] = []
-    repos = [(product.repos[name], base) for name, base in targets]
-    if any(r.uses_product_standards for r, _ in repos) and central_location is not None and central_location.is_dir():
+    repos = [(product.repos[name], base, ref) for name, base, ref in targets]
+    if any(r.uses_product_standards for r, _, _ in repos) and central_location is not None and central_location.is_dir():
         path = product_standards_path(central_location, product.name)
         if not path.is_file():
-            users = ", ".join(repr(r.name) for r, _ in repos if r.uses_product_standards)
+            users = ", ".join(repr(r.name) for r, _, _ in repos if r.uses_product_standards)
             problems.append(
                 f"the Product's Coding standards file {PRODUCT_STANDARDS.format(product=product.name)} is missing "
                 f"from the Central skills at {central_location} (selected by Repo {users})"
             )
-    for repo, base in repos:
-        if not repo.uses_repo_rules or not _readable(repo.source, base):
+    for repo, base, ref in repos:
+        if not repo.uses_repo_rules or not has_commit(repo.source, ref):
             continue
-        absent = [p for p in repo.rules_files if not _rules_paths(repo.source, base, p)]
+        absent = [p for p in repo.rules_files if not _rules_paths(repo.source, ref, p)]
         if absent:
             problems.append(
                 f"Repo {repo.name!r} has no rules file {', '.join(absent)} on its Base branch ({base}), "
@@ -134,13 +141,13 @@ def missing(product: ProductConfig, targets: list[tuple[str, str]], central_loca
     return problems
 
 
-def resolve(product: ProductConfig, targets: list[tuple[str, str]], central_location: Path) -> ResolvedStandards:
+def resolve(product: ProductConfig, targets: list[Target], central_location: Path) -> ResolvedStandards:
     """Read every selected Coding standards file; raises MissingStandards if any is absent."""
     if problems := missing(product, targets, central_location):
         raise MissingStandards(problems)
     product_file = None
     repos: list[RepoStandards] = []
-    for name, base in targets:
+    for name, base, ref in targets:
         repo = product.repos[name]
         files: list[StandardsFile] = []
         if repo.uses_product_standards:
@@ -153,20 +160,20 @@ def resolve(product: ProductConfig, targets: list[tuple[str, str]], central_loca
                 )
             files.append(product_file)
         if repo.uses_repo_rules:
-            files += _repo_rules(repo, base)
+            files += _repo_rules(repo, base, ref)
         repos.append(RepoStandards(name, repo.coding_standards, files))
     return ResolvedStandards(product_file, repos)
 
 
-def _repo_rules(repo: RepoConfig, base: str) -> list[StandardsFile]:
+def _repo_rules(repo: RepoConfig, base: str, ref: str) -> list[StandardsFile]:
     out: list[StandardsFile] = []
     seen: set[str] = set()
     for named in repo.rules_files:
-        for path in _rules_paths(repo.source, base, named):
+        for path in _rules_paths(repo.source, ref, named):
             if path in seen:
                 continue
             seen.add(path)
-            content = _git(repo.source, "show", f"{base}:{path}", text=False)
+            content = _git(repo.source, "show", f"{ref}:{path}", text=False)
             out.append(StandardsFile(
                 f"{STAGED_STANDARDS_DIR}/repos/{repo.name}/{path}", content,
                 f"`{path}` in Repo {repo.name} as on its Base branch {base}",
@@ -174,22 +181,16 @@ def _repo_rules(repo: RepoConfig, base: str) -> list[StandardsFile]:
     return out
 
 
-def _rules_paths(source: str, base: str, named: str) -> list[str]:
+def _rules_paths(source: str, ref: str, named: str) -> list[str]:
     """The files a named rules path stands for on the Base branch (a file, or every file in a folder)."""
     r = subprocess.run(
-        ["git", "-C", source, "ls-tree", "-r", "--name-only", "-z", base, "--", named],
+        ["git", "-C", source, "ls-tree", "-r", "--name-only", "-z", ref, "--", named],
         capture_output=True,
     )
     if r.returncode != 0:
         return []
     paths = [p.decode() for p in r.stdout.split(b"\0") if p]
     return [p for p in paths if p == named or p.startswith(named + "/")]
-
-
-def _readable(source: str, base: str) -> bool:
-    return subprocess.run(
-        ["git", "-C", source, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], capture_output=True
-    ).returncode == 0
 
 
 def _git(source: str, *args: str, text: bool = True):

@@ -43,8 +43,8 @@ codes; the table is `AgentProfile.error_kinds` (default: claude-agent-acp's).
 
 | How the run ended | Outcome |
 |---|---|
-| Agent's last reply ends `RUN-OUTCOME: done` | `succeeded` |
-| Agent finished otherwise, or with `RUN-OUTCOME: gave-up: <why>` | `agent-gave-up` |
+| A line of the agent's final reply is `RUN-OUTCOME: done` (the last marker line counts) | `succeeded` |
+| Agent finished with `RUN-OUTCOME: gave-up: <why>` or no marker, or OpenHands stopped it as stuck with no error | `agent-gave-up` |
 | Agent error `errorKind` `authentication_failed`, or ACP code -32000 (claude-agent-acp's "Authentication required", e.g. for a rejected Claude Code token) | `needs-setup` |
 | Agent error `errorKind` `rate_limit` / `billing_error` | `quota-exhausted` |
 | Any other agent error, a sandbox that fails to start or dies mid-run, unreachable Central skills | `infra-failure` |
@@ -54,6 +54,10 @@ surfaces in seconds; infrastructure retries are the caller's. When the error
 itself is bare (claude-agent-acp's `[-32000] Authentication required`), the
 reason also quotes what the agent said in the failed turn (e.g. Claude Code's
 `API Error: 401 OAuth access token is invalid.`).
+
+However a run ends, its lease is released, its record saved and its push token
+revoked; a teardown step that fails (closing the conversation, removing the
+sandbox) is noted in the run's `run.log` and does not stop the others.
 
 Each run's `record.json` and conversation `events.jsonl` are kept under
 `runs_dir/<run id>/`, outside the sandbox.
@@ -143,8 +147,8 @@ tells the agent to use it wherever a skill refers to
 written into a working copy. The agent works on a writable copy at
 `/weave/tracker/` (`spec.md`, `issues/NN-<slug>.md`, each with a `Status:`
 line); "closing" a ticket sets `Status: done`. When the run ends, before the
-sandbox is removed, the worker reads those lines back into the record's
-`tickets_done` (`spec`, `01`, `02`, ... in Task order). See
+sandbox is removed, the worker reads those lines back into `tickets_done`
+(`spec`, `01`, `02`, ... in Task order) on the record and the final status. See
 `agent_worker/local_tickets.py`.
 
 **Push gateway.** The sandbox's only git credential is a random per-run token in
@@ -154,9 +158,21 @@ server (`agent_worker/push_gateway.py`, `git http-backend`) on the Docker
 bridge gateway. Per run it keeps a bare mirror of each Repo whose
 `pre-receive` hook accepts only `refs/heads/<Integration branch>` (no deletes,
 tags or other branches, the Base branch included), and before accepting it
-pushes the commit onward to the Repo's `source` with the Sandbox host's own git
-credentials. A push is either refused or lands on the real Integration branch;
-the token is revoked and the mirrors deleted when the run ends.
+pushes the commit onward to the Repo's `source` (the Sandbox host's clone) and
+from there to the Code host, both with the Sandbox host's own git credentials
+(the sandbox never holds them). A push is either refused or lands on the Code
+host's Integration branch; the token is revoked and the mirrors deleted when the
+run ends.
+
+**The Code host remote.** A Repo's `push_remote` (Product config) names the
+remote of its `source` clone that leads to the Code host; by default `origin`,
+when the clone has one. Before the pre-checks, and again when the run starts,
+the worker fetches the Base branch from it, so `CONTEXT.md`, the rules files and
+the Repo's own skills are read from, and the working copy starts at, the Code
+host's Base branch (the clone's checked-out files are not touched). A clone with
+no Code host remote (a local-only Repo, as in the tests) is used as it stands,
+and pushes stop at it; `run.log` says which applies to each Repo. A configured
+`push_remote` that the clone lacks refuses the run as `needs-setup`.
 `WorkerSettings.push_gateway` lets several workers share one gateway (default:
 each worker starts its own).
 
@@ -168,9 +184,10 @@ PR write has nothing to authenticate with.
 
 **For the real Code host (GitHub).** The design holds as is: the gateway is the
 only party with a GitHub credential, and the agent never sees it. Production
-needs: a Repo `source` that is the GitHub URL, and a Sandbox host credential
-that can push to it (a deploy key or fine-grained token with `contents: write`
-only, used by the hook's onward push); ideally a GitHub ruleset restricting
+needs: a Repo `source` that is a clone of the GitHub repo (its `origin`, or the
+remote named by `push_remote`), and a Sandbox host credential that can push to
+it (a deploy key or fine-grained token with `contents: write` only, used by the
+hook's onward push from that clone); ideally a GitHub ruleset restricting
 that credential to the Integration branch pattern as a second line of defence;
 and, for larger Repos, a persistent mirror per Repo instead of a fresh clone
 per run. The gateway must listen only where sandboxes can reach it (the bridge

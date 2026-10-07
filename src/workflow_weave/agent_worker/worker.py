@@ -9,13 +9,15 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from openhands.sdk import Conversation
 from openhands.sdk.agent import ACPAgent
 from openhands.sdk.conversation.response_utils import get_agent_final_response
 
-from .config import WorkerSettings
+from .config import ProductConfig, WorkerSettings
+from . import git
+from .git import GitError
 from .model import NeedsSetup, NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
 from .outcomes import (
     DONE_MARK, GAVE_UP_MARK, classify_error, classify_final_reply, last_error_detail, with_agent_words,
@@ -28,6 +30,8 @@ from .push_gateway import GATEWAY_HOST, PushGateway, RunRemotes, without_code_ho
 from .staging import StagingError, StagingPlan, central_skills_version, read_repo_skills
 from .staging import plan as plan_skills
 from workflow_weave.central_skills import CentralSkills
+
+T = TypeVar("T")
 
 TERMINAL = {"finished", "error", "stuck"}
 # How often a running run checks that its sandbox is still alive.
@@ -98,24 +102,32 @@ class AgentWorker:
             store.release(lease)
             raise
 
-    def _needs_setup(self, request: RunRequest, product: Any, agent: str) -> str | None:
+    def _needs_setup(self, request: RunRequest, product: ProductConfig, agent: str) -> str | None:
         """The pre-checks: what a human must set up before this run can start, or None.
 
         Checked in order, from the Sandbox host alone (no sandbox, no lease):
-        the Product has a Subscription for the agent; every Repo has a
-        `CONTEXT.md` on its Base branch; every selected Coding standards file
-        exists (the Product's file in the Central skills, each Repo's named
-        rules files on its Base branch).
+        the Product has a Subscription for the agent; every Repo's configured
+        `push_remote` is in its clone; every Repo has a `CONTEXT.md` on its Base
+        branch; every selected Coding standards file exists (the Product's file
+        in the Central skills, each Repo's named rules files on its Base branch).
+        The Base branch is the Code host's, fetched first when the clone has a
+        Code host remote.
         """
         if not self.settings.subscriptions.associated(request.product, agent):
             return (
                 f"Product {request.product!r} has no Subscription associated for agent {agent!r}: "
                 f"associate one in the Subscription store"
             )
+        try:
+            code_hosts = _code_host_remotes(request, product)
+        except GitError as e:
+            return f"{e}: add that remote to the clone, or fix the Repo's push_remote"
+        # A failed fetch is not refused here: the run itself reports it (as an infra-failure).
+        refs = _base_refs(request, product, code_hosts, strict=False)
         missing = []
         for target in request.repos:
             source = product.repos[target.name].source
-            if _missing_on_branch(source, target.base_branch, "CONTEXT.md"):
+            if _missing_on_branch(source, refs[target.name], "CONTEXT.md"):
                 missing.append(target.name)
         if missing:
             names = ", ".join(repr(m) for m in missing)
@@ -125,7 +137,7 @@ class AgentWorker:
                 f"onboard it (e.g. setup-matt-pocock-skills) before running agents on it"
             )
         absent = standards.missing(
-            product, [(t.name, t.base_branch) for t in request.repos], self._central_location()
+            product, [(t.name, t.base_branch, refs[t.name]) for t in request.repos], self._central_location()
         )
         if absent:
             return "Coding standards missing: " + "; ".join(absent)
@@ -137,7 +149,7 @@ class AgentWorker:
 
     def _launch(self, request: RunRequest, lease: Lease) -> Started:
         run_id = _new_run_id()
-        run_dir = self.settings.runs_dir / run_id
+        run_dir = self._run_dir(run_id)
         run_dir.mkdir(parents=True)
         record = RunRecord(
             run_id=run_id,
@@ -167,7 +179,7 @@ class AgentWorker:
 
     def record(self, run_id: str) -> RunRecord:
         """The saved run record (read from outside the sandbox)."""
-        path = self.settings.runs_dir / run_id / "record.json"
+        path = self._run_dir(run_id) / "record.json"
         if not path.exists():
             raise UnknownRun(run_id)
         return RunRecord.from_json(path.read_text())
@@ -201,21 +213,36 @@ class AgentWorker:
         rec = run.record
         profile = self.settings.agent_profiles[run.request.agent_profile]
         product = self.settings.products[run.request.product]
+        run_dir = self._run_dir(rec.run_id)
         sandbox: Sandbox | None = None
         conversation = None
         remotes: RunRemotes | None = None
-        final: tuple[RunState, Outcome | None, str | None]
+        leftovers: list[str] | None = None
+        final: tuple[RunState, Outcome | None, str | None] = (
+            RunState.ENDED, Outcome.INFRA_FAILURE, "the run stopped before it could report how it ended",
+        )
         try:
-            staging = self._plan_skills(run, product)
+            code_hosts = _code_host_remotes(run.request, product)
+            refs = _base_refs(run.request, product, code_hosts, strict=True)
+            for t in run.request.repos:
+                source = product.repos[t.name].source
+                if remote := code_hosts[t.name]:
+                    self._note(rec, f"Repo {t.name!r}: Base branch {t.base_branch} fetched from the Code host "
+                                    f"(remote {remote!r} of {source}); pushes continue to it")
+                else:
+                    self._note(rec, f"Repo {t.name!r}: its clone at {source} has no Code host remote; "
+                                    f"Base branch {t.base_branch} read as it stands there, and pushes stop there")
+            staging = self._plan_skills(run, product, refs)
             resolved = standards.resolve(
-                product, [(t.name, t.base_branch) for t in run.request.repos], self._central_location()
+                product, [(t.name, t.base_branch, refs[t.name]) for t in run.request.repos], self._central_location()
             )
-            originals = local_tickets.write_originals(
-                run.request.inputs, self.settings.runs_dir / rec.run_id / "tickets"
-            )
+            originals = local_tickets.write_originals(run.request.inputs, run_dir / "tickets")
             remotes = self.push_gateway.open_run(
-                self.settings.runs_dir / rec.run_id / "remotes",
-                {t.name: (product.repos[t.name].source, t.integration_branch) for t in run.request.repos},
+                run_dir / "remotes",
+                {
+                    t.name: (product.repos[t.name].source, t.integration_branch, code_hosts[t.name])
+                    for t in run.request.repos
+                },
             )
             env, dropped = without_code_host_tokens({**run.lease.env, "ACP_PROMPT_MAX_RETRIES": "0"})
             if dropped:
@@ -240,7 +267,7 @@ class AgentWorker:
             for target in run.request.repos:
                 sandbox.put_repo(
                     product.repos[target.name].source, target.name, target.base_branch, target.integration_branch,
-                    remotes.url(target.name),
+                    remotes.url(target.name), base_ref=refs[target.name],
                 )
             stage_skills(sandbox, staging)
             # The always-on file and the resolved Coding standards, at user level (ADR 0002).
@@ -269,17 +296,33 @@ class AgentWorker:
         except Exception as e:  # anything else that broke the run's infrastructure
             final = (RunState.ENDED, Outcome.INFRA_FAILURE, f"{type(e).__name__}: {e}"[:2000])
         finally:
-            leftovers = self._stop(conversation, sandbox, rec)
-            if remotes is not None:
-                self.push_gateway.close_run(remotes)  # the run's push token stops working
-            self.settings.subscriptions.release(run.lease)  # however the run ended
-        rec.processes_left_after_close = leftovers
-        if leftovers:
-            self._note(rec, f"processes still running after the agent was closed: {leftovers}")
-        state, outcome, reason = final
-        rec.state, rec.outcome, rec.reason, rec.ended_at = state, outcome, reason, _now()
-        self._save(rec)
-        run.done.set()
+            # Every end path releases the lease, saves the record and finishes the run,
+            # however teardown goes (a teardown failure is noted in run.log).
+            try:
+                leftovers = self._stop(conversation, sandbox, rec)
+                if remotes is not None:
+                    gateway_remotes = remotes
+                    self._best_effort(rec, "revoking the run's push token",
+                                      lambda: self.push_gateway.close_run(gateway_remotes))
+            finally:
+                try:
+                    self.settings.subscriptions.release(run.lease)  # however the run ended
+                finally:
+                    self._finish(run, final, leftovers)
+
+    def _finish(
+        self, run: _Run, final: tuple[RunState, Outcome | None, str | None], leftovers: list[str] | None
+    ) -> None:
+        rec = run.record
+        try:
+            rec.processes_left_after_close = leftovers
+            if leftovers:
+                self._note(rec, f"processes still running after the agent was closed: {leftovers}")
+            rec.state, rec.outcome, rec.reason = final
+            rec.ended_at = _now()
+            self._save(rec)
+        finally:
+            run.done.set()
 
     def _wait(self, conversation: Any, run: _Run, sandbox: Sandbox) -> str | None:
         """Wait for the conversation to end; None if the run was cancelled first.
@@ -303,37 +346,45 @@ class AgentWorker:
                 next_check = time.monotonic() + SANDBOX_CHECK_INTERVAL
 
     def _stop(self, conversation: Any, sandbox: Sandbox | None, rec: RunRecord) -> list[str] | None:
-        """Close the conversation (never just interrupt it, #13), then remove the sandbox."""
+        """Close the conversation (never just interrupt it, #13), then remove the sandbox.
+
+        Best effort: each step that fails is noted in run.log, and the next one still runs.
+        """
         leftovers: list[str] | None = None
         if conversation is not None:
-            try:
-                _EventLog(rec.event_log).rewrite(conversation.state.events)
-            except Exception:
-                pass
-            try:
-                conversation.close()  # deletes the conversation on the agent-server
-            except Exception:
-                pass
+            self._best_effort(rec, "saving the event log",
+                              lambda: _EventLog(rec.event_log).rewrite(conversation.state.events))
+            # Deletes the conversation on the agent-server.
+            self._best_effort(rec, "closing the agent's conversation", conversation.close)
         if sandbox is not None:
-            try:
-                if conversation is not None:
-                    leftovers = _settle(sandbox.processes)
-            except Exception:
-                pass
-            try:
-                rec.tickets_done = local_tickets.done_tickets(sandbox.sh(local_tickets.READ_STATUSES, cwd="/"))
-            except Exception:
-                pass
-            sandbox.destroy()
+            if conversation is not None:
+                leftovers = self._best_effort(rec, "listing processes left after close",
+                                              lambda: _settle(sandbox.processes))
+            rec.tickets_done = self._best_effort(
+                rec, "reading back the local tickets marked done",
+                lambda: local_tickets.done_tickets(sandbox.sh(local_tickets.READ_STATUSES, cwd="/")),
+            )
+            self._best_effort(rec, "removing the sandbox", sandbox.destroy)
         return leftovers
 
-    def _plan_skills(self, run: _Run, product: Any) -> StagingPlan:
+    def _best_effort(self, rec: RunRecord, what: str, step: Callable[[], T]) -> T | None:
+        """Run one teardown step; if it fails, note it with its error and carry on."""
+        try:
+            return step()
+        except Exception as e:
+            self._note(rec, f"teardown: {what} failed: {type(e).__name__}: {e}")
+            return None
+
+    def _plan_skills(self, run: _Run, product: ProductConfig, refs: dict[str, str]) -> StagingPlan:
         """Decide the run's skills, and record the Central skills version and every clash."""
         if self.settings.central_skills_location is None:
             raise StagingError("no Central skills location is configured")
         central = CentralSkills(Path(self.settings.central_skills_location))
         repos = [
-            read_repo_skills(t.name, product.repos[t.name].source, t.base_branch, product.repos[t.name].skill_overrides)
+            read_repo_skills(
+                t.name, product.repos[t.name].source, t.base_branch, product.repos[t.name].skill_overrides,
+                ref=refs[t.name],
+            )
             for t in run.request.repos
         ]
         plan = plan_skills(central, run.request.skill, repos)
@@ -349,28 +400,66 @@ class AgentWorker:
 
     # ------------------------------------------------------------------ records
 
+    def _run_dir(self, run_id: str) -> Path:
+        """Where a run's record, event log, run.log, tickets and gateway mirrors live."""
+        return self.settings.runs_dir / run_id
+
     def _save(self, rec: RunRecord) -> None:
-        path = self.settings.runs_dir / rec.run_id / "record.json"
+        path = self._run_dir(rec.run_id) / "record.json"
         tmp = path.with_suffix(".tmp")
         tmp.write_text(rec.to_json())
         tmp.replace(path)
 
     def _note(self, rec: RunRecord, line: str) -> None:
-        with open(self.settings.runs_dir / rec.run_id / "run.log", "a") as f:
+        with open(self._run_dir(rec.run_id) / "run.log", "a") as f:
             f.write(f"{_now()} {line}\n")
 
 
-def _missing_on_branch(source: str, branch: str, path: str) -> bool:
-    """True when a readable Repo's branch has no file at `path`.
+def _missing_on_branch(source: str, ref: str, path: str) -> bool:
+    """True when a readable Repo's branch (read at `ref`) has no file at `path`.
 
     A Repo or branch that cannot be read at all is left for the run itself to
     report (as an infra-failure), not refused here.
     """
-    if subprocess.run(
-        ["git", "-C", source, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}"], capture_output=True
-    ).returncode != 0:
+    if not git.has_commit(source, ref):
         return False
-    return subprocess.run(["git", "-C", source, "cat-file", "-e", f"{branch}:{path}"], capture_output=True).returncode != 0
+    return subprocess.run(["git", "-C", source, "cat-file", "-e", f"{ref}:{path}"], capture_output=True).returncode != 0
+
+
+def _code_host_remotes(request: RunRequest, product: ProductConfig) -> dict[str, str | None]:
+    """Each Repo's Code host remote in its clone, or None; GitError if a configured one is missing."""
+    out: dict[str, str | None] = {}
+    for t in request.repos:
+        repo = product.repos[t.name]
+        try:
+            out[t.name] = git.code_host_remote(repo.source, repo.push_remote)
+        except GitError as e:
+            raise GitError(f"Repo {t.name!r}: {e}") from e
+    return out
+
+
+def _base_refs(
+    request: RunRequest, product: ProductConfig, code_hosts: dict[str, str | None], *, strict: bool
+) -> dict[str, str]:
+    """Where to read each Repo's Base branch: the Code host's, just fetched into the clone,
+    or the clone's own branch when it has no Code host remote.
+
+    With `strict`, a failed fetch raises GitError; otherwise the Base branch is read as
+    last fetched.
+    """
+    refs: dict[str, str] = {}
+    for t in request.repos:
+        remote = code_hosts[t.name]
+        if remote is None:
+            refs[t.name] = t.base_branch
+            continue
+        try:
+            refs[t.name] = git.fetch_base(product.repos[t.name].source, remote, t.base_branch)
+        except GitError as e:
+            if strict:
+                raise GitError(f"Repo {t.name!r}: {e}") from e
+            refs[t.name] = f"refs/remotes/{remote}/{t.base_branch}"
+    return refs
 
 
 def _settle(probe: Any, timeout: float = 10.0) -> list[str]:
@@ -431,4 +520,8 @@ def _classify(status: str, conversation: Any, error_kinds: Any) -> tuple[Outcome
     detail = last_error_detail(events)
     if detail is not None:
         return classify_error(with_agent_words(detail, events), error_kinds)
+    if status == "stuck":
+        # OpenHands' stuck detector stopped an agent going round in circles: it did not
+        # finish its skill, and nothing in the infrastructure failed.
+        return Outcome.AGENT_GAVE_UP, "agent gave up: its conversation ended stuck (no progress), with no error"
     return Outcome.INFRA_FAILURE, f"the agent failed: its conversation ended as {status} with no error reported"

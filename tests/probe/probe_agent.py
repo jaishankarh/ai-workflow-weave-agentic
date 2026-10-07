@@ -13,6 +13,7 @@ claude-agent-acp, Cursor's `agent acp`). On each prompt it:
 
    - ``{"end": "succeed"}``  reports completion (``RUN-OUTCOME: done``)
    - ``{"end": "give-up", "reason": "..."}``  ends without completing
+   - ``{"end": "reply", "text": "..."}``  ends with exactly that final reply
    - ``{"end": "hang", "command": "sleep 600"}``  runs a command that never
      finishes and waits on it. Like Claude Code, an ACP ``session/cancel``
      (an interrupt) does NOT stop the command; only closing the agent does.
@@ -462,6 +463,9 @@ class ProbeAgent:
         if end == "give-up":
             reason = script.get("reason", "the probe was told to give up")
             await self._send(session_id, update_agent_message_text(f"RUN-OUTCOME: gave-up: {reason}\n"))
+            return PromptResponse(stop_reason="end_turn")
+        if end == "reply":
+            await self._send(session_id, update_agent_message_text(script.get("text", "")))
             return PromptResponse(stop_reason="end_turn")
         if end == "hang":
             command = script.get("command", "sleep 600")

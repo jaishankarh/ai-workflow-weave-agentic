@@ -14,9 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from conftest import probe_reports, wait_until_ended, wait_until_hanging, PRODUCT
+from conftest import (
+    PRODUCT, commit_on_code_host, make_code_host, probe_reports, wait_until_ended, wait_until_hanging,
+)
 
-from workflow_weave.agent_worker import Outcome, RepoTarget, RunInputs, RunRequest
+from workflow_weave.agent_worker import NeedsSetup, Outcome, RepoTarget, RunInputs, RunRequest
 
 import json
 
@@ -64,6 +66,7 @@ def test_tickets_the_probe_marks_done_are_listed_in_the_run_result(make_worker):
 
     assert final.outcome is Outcome.SUCCEEDED, final.reason
     assert record.tickets_done == ["spec", "02"]
+    assert final.tickets_done == ["spec", "02"]  # the final status carries it too
     # It is part of the saved result, read back without the sandbox.
     assert make_worker().record(record.run_id).tickets_done == ["spec", "02"]
 
@@ -75,13 +78,50 @@ def branch_tip(repo: Path, branch: str) -> str | None:
 
 
 def test_the_probe_can_push_to_the_runs_integration_branch(worker, onboarded_repo):
-    final, _, report = run(worker, {"end": "succeed", "push": ["story-1"]})
+    final, record, report = run(worker, {"end": "succeed", "push": ["story-1"]})
 
     assert final.outcome is Outcome.SUCCEEDED, final.reason
     [push] = [a for a in report["actions"] if a["action"] == "push"]
     assert push["ok"], push
     # The commit reached the Repo itself, on the Integration branch.
     assert branch_tip(onboarded_repo, "story-1") == push["commit"]
+    # This clone has no Code host remote: the push stops here, and the run log says so.
+    run_log = (worker.settings.runs_dir / record.run_id / "run.log").read_text()
+    assert "no Code host remote" in run_log and "'app'" in run_log
+
+
+def test_a_push_to_the_integration_branch_reaches_the_code_host_built_on_its_base_branch(make_worker, tmp_path):
+    code_host, clone = make_code_host(tmp_path / "hosts", {"CONTEXT.md": "# Context: app\n"})
+    # The Code host's Base branch moved on since the Sandbox host's clone last fetched.
+    code_host_main = commit_on_code_host(code_host, {"later.md": "landed elsewhere\n"})
+    worker = make_worker(product_yaml=f"product: {PRODUCT}\nrepos:\n  app:\n    source: {clone}\n")
+    try:
+        final, _, report = run(worker, {"end": "succeed", "push": ["story-1"]})
+    finally:
+        worker.shutdown()
+
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+    [push] = [a for a in report["actions"] if a["action"] == "push"]
+    assert push["ok"], push
+    assert branch_tip(code_host, "story-1") == push["commit"]
+    assert branch_tip(clone, "story-1") == push["commit"]
+    parent = subprocess.run(["git", "-C", str(code_host), "rev-parse", f"{push['commit']}^"],
+                            capture_output=True, text=True).stdout.strip()
+    assert parent == code_host_main
+
+
+def test_a_configured_push_remote_missing_from_the_clone_is_needs_setup(make_worker, onboarded_repo):
+    worker = make_worker(
+        product_yaml=f"product: {PRODUCT}\nrepos:\n  app:\n    source: {onboarded_repo}\n    push_remote: upstream\n"
+    )
+    try:
+        refused = worker.start(request({"end": "succeed"}))
+    finally:
+        worker.shutdown()
+
+    assert isinstance(refused, NeedsSetup), refused
+    assert "'upstream'" in refused.reason and "'app'" in refused.reason
+    assert not list(worker.settings.runs_dir.iterdir())
 
 
 def test_pushing_to_any_other_branch_including_the_base_branch_is_refused(worker, onboarded_repo):

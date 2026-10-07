@@ -12,7 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from conftest import PRODUCT, PROBE_SUBSCRIPTION, make_repo, probe_reports, probe_request, wait_until_ended
+from conftest import (
+    PRODUCT, PROBE_SUBSCRIPTION, commit_on_code_host, make_code_host, make_repo, probe_reports, probe_request,
+    wait_until_ended,
+)
 from test_skill_staging import tree_digest
 
 from workflow_weave.agent_worker import (
@@ -164,6 +167,18 @@ def test_a_rules_file_changed_on_the_working_branch_is_still_read_in_its_base_br
 
     assert REPO_RULE in contents
     assert not [c for c in contents if "anything goes" in c.lower()]
+
+
+def test_rules_files_are_read_from_the_code_hosts_base_branch_not_a_stale_clone(make_worker, central, tmp_path):
+    code_host, clone = make_code_host(tmp_path / "hosts", {"CONTEXT.md": CONTEXT, "CLAUDE.md": REPO_CLAUDE_MD})
+    # The rule changed on the Code host's Base branch after the Sandbox host's clone last fetched.
+    newer = "# app\n\nAlways run the type checker and the linter.\n"
+    commit_on_code_host(code_host, {"CLAUDE.md": newer, ".claude/rules/naming.md": REPO_RULE})
+    worker = make_worker(
+        central_skills_location=central, product_yaml=standards_yaml(clone, "repo", ["CLAUDE.md", ".claude/rules"])
+    )
+
+    assert sorted(pointed_contents(run_probe(worker))) == sorted([CONTEXT, newer, REPO_RULE])
 
 
 def test_the_always_on_file_points_at_the_repos_context_md_and_the_repos_own_root_claude_md_is_untouched(
