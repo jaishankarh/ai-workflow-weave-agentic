@@ -48,7 +48,9 @@ codes; the table is `AgentProfile.error_kinds` (default: claude-agent-acp's).
 | Agent error `errorKind` `authentication_failed`, or ACP code -32000 (claude-agent-acp's "Authentication required", e.g. for a rejected Claude Code token) | `needs-setup` |
 | Agent error `errorKind` `rate_limit` / `billing_error` | `quota-exhausted` |
 | Any other agent error, a sandbox that fails to start or dies mid-run, unreachable Central skills, a Sandbox host without the `sandbox_runtime` a run needs for its Environment (checked before anything starts) | `infra-failure` |
-| A Repo's Run recipe that cannot be read, or whose services do not start or become ready (before any agent starts; see "Environments") | `needs-setup` |
+| A Repo's Run recipe that cannot be read, or whose services do not start or become ready, with every Repo at its Base branch (before any agent starts; see "Environments") | `needs-setup` |
+| The Environment fails to come up because of the host or network (an unreachable image registry, the Docker daemon not answering) | `infra-failure` |
+| The Environment fails to come up with the Story's branches in place but comes up with every Repo at its Base branch | `environment-broken` |
 
 `ACP_PROMPT_MAX_RETRIES=0` is set in every sandbox, so a rejected credential
 surfaces in seconds; infrastructure retries are the caller's. When the error
@@ -246,8 +248,11 @@ sees their data. It runs with `docker compose -p <repo> exec` in the named servi
 own project, with only the Test secrets that recipe names (also handed to the command with `-e`),
 so a Repo's seed has no credential for a sibling's databases. This is placement and credential
 scoping, not a firewall: the network is open, so a recipe that hard-codes a sibling's credentials
-could still reach it. A failing seed ends the run before any agent starts (`needs-setup`, naming the
-Repo, service and output, secret values redacted). A Repo with no seed omits the field. The run
+could still reach it. A failing seed ends the run before any agent starts, and is classified like a service that
+would not start (see "Environments"): `infra-failure` for a host or network fault, else retried once
+with every Repo at its Base branch (the first attempt is taken down with its volumes, so no seeded
+state carries over; seeding runs again on the retry) and then `needs-setup`, or `environment-broken`
+if Base seeds fine. The reason names the Repo, service and output, secret values redacted. A Repo with no seed omits the field. The run
 record lists `environment_seeds` (Repo, service, command, `seeded_at`, `seconds`).
 
 Between staging the agent's files and starting the agent, the worker brings each such Repo's
@@ -265,15 +270,33 @@ for the Repo being worked on (`RunRequest.working_on`, default the first of `rep
 (Integration branch) for another Repo in `repos`, and its Base branch for a Repo the run does not
 touch, so an Environment never holds another Story's unmerged work. The last two run from a
 checkout under `/weave/env/src/<repo>` that the agent does not edit. A service that does not start or does not
-become ready in time ends the run before any agent starts (no Subscription use), as `needs-setup`
-with a reason naming the Repo, the service and its last log lines. (Telling that apart from a
-Story's branches breaking the Environment, `environment-broken`, is #51.) The containers have open
-internet access, and go with the sandbox: nothing is shared between runs.
+become ready in time ends the run before any agent starts (no Subscription use; the lease is still
+released), and which outcome it reports depends on why:
 
-The run record lists `environment_repos` (each Repo in the Environment, with `source`: working
+- The engine's output blames the host or network (an unreachable registry or daemon, a DNS, TLS or
+  connection failure, a registry that is down or rate-limiting): `infra-failure`, for the Dispatcher to
+  retry. Never retried here. (A pull that is refused or an image that does not exist is the recipe's
+  fault, not the host's.)
+- Otherwise, if some Repo runs from the Story's work (a Task branch found, or a working copy that is
+  past its Base branch), the whole Environment is taken down and brought up once more with every Repo
+  at its Base branch. Failing there too is `needs-setup`, with the reason of that second failure
+  (Repo, service, last log lines). Coming up there means the Story broke it: `environment-broken`,
+  whose reason carries the first failure's log lines; a Dispatcher treats it like red Checks.
+- A run in which every Repo already starts at its Base branch (a first implement run) reports a
+  non-host failure as `needs-setup` and does not retry. A healthy bring-up never retries.
+
+Only a service that does not start or become ready is retried. A recipe that cannot be read, a
+missing Test secret and a `depends_on` problem are `needs-setup` at once.
+
+The containers have open internet access, and go with the sandbox: nothing is shared between runs.
+
+The run record lists `environment_bring_up_attempts` (`["branches"]`, `["base"]` for a run that
+started every Repo at Base, or `["branches", "base"]` after the retry) and `environment_repos` (each Repo in the Environment, with `source`: working
 copy, Task branch or Base branch, its `branch`, and whether the run `touched` it),
 `environment_services` (Repo, service, address, `ready_at`, `seconds_to_ready`) and `environment_logs` (each service's log, saved to
-`<runs_dir>/<run id>/environment/<repo>/<service>.log` before the sandbox is removed).
+`<runs_dir>/<run id>/environment/<repo>/<service>.log` before the sandbox is removed; the logs of a
+failed first attempt, taken down before the retry, are kept as `with-branches/<repo>/<service>` under
+`environment/`). `status` and the record report `environment-broken` as an outcome of its own.
 
 #### Environment MCP servers
 

@@ -170,7 +170,7 @@ def test_a_service_that_never_passes_its_check_ends_the_run_before_the_agent_sta
         record = worker.record(started.run_id)
     finally:
         worker.shutdown()
-    assert final.outcome is Outcome.NEEDS_SETUP  # provisional: Spec 2 #51 splits this by retrying at Base
+    assert final.outcome is Outcome.NEEDS_SETUP  # a run at Base throughout: no retry (#51)
     assert "svc" in final.reason and "web" in final.reason and "not ready" in final.reason
     assert record.environment_services in (None, [])
     log = Path(record.event_log)
