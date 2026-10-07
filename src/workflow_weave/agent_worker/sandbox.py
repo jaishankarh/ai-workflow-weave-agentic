@@ -274,6 +274,15 @@ class Sandbox:
         self.sh(f"git fetch -q {shlex.quote(src)} {ref} && git checkout -q --detach FETCH_HEAD", cwd=dest)
         return found
 
+    def put_base_checkout(self, name: str, base_branch: str, dest: str) -> None:
+        """Check out, at `dest`, the Base branch of a Repo the Story touches, from its clone in the
+        sandbox: what the Environment runs from when it is retried with every Repo at Base (#51).
+        Re-running over an earlier checkout at `dest` replaces its files."""
+        src = f"{WORKDIR}/{name}"
+        self.sh(f"mkdir -p {shlex.quote(dest)} && git init -q {shlex.quote(dest)}", cwd="/")
+        self.sh(f"git fetch -q {shlex.quote(src)} {shlex.quote(f'refs/heads/{base_branch}')} && "
+                f"git checkout -q -f --detach FETCH_HEAD", cwd=dest)
+
     def processes(self) -> list[str]:
         """Command lines of live processes, apart from the agent-server itself."""
         r = _docker("exec", self.container_id, "ps", "-eo", "pid=,stat=,args=")
