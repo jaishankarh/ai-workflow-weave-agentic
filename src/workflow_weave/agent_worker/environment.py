@@ -48,6 +48,7 @@ seeds, so `reset` can call it again after bringing everything up fresh.
 
 from __future__ import annotations
 
+import re
 import shlex
 import time
 from dataclasses import dataclass
@@ -88,12 +89,45 @@ class RecipeError(ValueError):
 
 
 class EnvironmentBringUpError(RuntimeError):
-    """The Environment could not be brought up. Raised before any agent starts."""
+    """The Environment could not be brought up. Raised before any agent starts.
 
-    def __init__(self, reason: str, outcome: Outcome = Outcome.NEEDS_SETUP) -> None:
+    `retryable` is true only for a service that would not start or become ready (#51): the one
+    failure a Story's own branches can cause, so the only one worth trying again at Base.
+    """
+
+    def __init__(self, reason: str, outcome: Outcome = Outcome.NEEDS_SETUP, retryable: bool = False) -> None:
         super().__init__(reason)
         self.reason = reason
         self.outcome = outcome
+        self.retryable = retryable
+
+
+# What a container engine says when the host or the network is at fault, not the recipe (#51):
+# an unreachable registry or daemon, a DNS or TLS failure, a timed-out connection, a registry that
+# is down or rate-limiting. A recipe naming an image that does not exist, or that needs a login
+# ("pull access denied", "manifest unknown"), is not in this list: a human fixes that.
+_HOST_FAULT = re.compile(
+    r"cannot connect to the docker daemon|is the docker daemon running|error during connect"
+    r"|no such host|server misbehaving|temporary failure in name resolution|name or service not known"
+    r"|dial tcp|connection refused|connection reset|network is unreachable|no route to host"
+    r"|tls handshake timeout|i/o timeout|context deadline exceeded|client\.timeout|request canceled while waiting"
+    r"|toomanyrequests|too many requests|unexpected http status: 5\d\d|\b50[234] (bad gateway|service unavailable"
+    r"|gateway time-?out)|no space left on device|unexpected eof",
+    re.IGNORECASE,
+)
+
+
+_DAEMON_DOWN = re.compile(
+    r"cannot connect to the docker daemon|is the docker daemon running|error during connect", re.IGNORECASE
+)
+
+
+def is_host_fault(output: str, daemon_only: bool = False) -> bool:
+    """Whether an engine's output says the Sandbox host or its network failed, rather than the recipe.
+
+    `daemon_only` is for the output of a readiness check, which is the service's own and so may
+    say "connection refused" about itself: only the engine being unreachable counts there."""
+    return bool((_DAEMON_DOWN if daemon_only else _HOST_FAULT).search(output or ""))
 
 
 class LogsNotSaved(RuntimeError):
@@ -334,6 +368,8 @@ class Environment:
         self.ready: list[ServiceReady] = []
         # The last seed that succeeded (None: no seed, or not seeded yet).
         self.seeded: SeedRun | None = None
+        # The /etc/hosts lines added for this Repo's services, so `tear_down` can take them out again.
+        self._hosts_lines: list[str] = []
 
     def _compose(self, *args: str) -> str:
         return shlex.join(compose_args(self.repo, self._recipe_file, self._override_file) + list(args))
@@ -345,6 +381,13 @@ class Environment:
 
     def _redacted(self, text: str) -> str:
         return redact(text, self._secrets.values())
+
+    def _failure(self, message: str, engine_output: str, daemon_only: bool = False) -> EnvironmentBringUpError:
+        """A service that would not come up: `infra-failure` when the engine's output blames the host
+        or network (never retried), else `needs-setup` that may be retried at Base (#51)."""
+        if is_host_fault(engine_output, daemon_only):
+            return EnvironmentBringUpError(message, Outcome.INFRA_FAILURE)
+        return EnvironmentBringUpError(message, Outcome.NEEDS_SETUP, retryable=True)
 
     def bring_up(self, recipe: Recipe) -> list[ServiceReady]:
         """Start the recipe's services and return once every one has passed its readiness check.
@@ -373,33 +416,34 @@ class Environment:
             self._with_secrets(self._compose("up", "--no-start", "--build"), recipe), timeout=UP_TIMEOUT, cwd="/"
         )
         if code != 0:
-            raise EnvironmentBringUpError(
+            raise self._failure(
                 f"Repo {self.repo!r}: its Run recipe's services did not start ({RECIPE_PATH}): "
-                f"{self._redacted(_tail(out))}"
+                f"{self._redacted(_tail(out))}", out,
             )
         containers = {service: self._attach(service) for service in recipe.services}
         code, out = self.sandbox.run(
             self._with_secrets(self._compose("up", "-d", "--no-recreate"), recipe), timeout=UP_TIMEOUT, cwd="/"
         )
         if code != 0:
-            raise EnvironmentBringUpError(
+            raise self._failure(
                 f"Repo {self.repo!r}: its Run recipe's services did not start ({RECIPE_PATH}): "
-                f"{self._redacted(_tail(out))}"
+                f"{self._redacted(_tail(out))}", out,
             )
         self._name_in_sandbox(containers)
         for service in recipe.services:
             check = recipe.readiness[service]
             deadline = started + check.timeout
             while True:
-                code, _ = self.sandbox.run(
+                code, last = self.sandbox.run(
                     self._compose("exec", "-T", service, *check.command), timeout=min(check.timeout, 60), cwd="/"
                 )
                 if code == 0:
                     break
                 if self._clock() >= deadline:
-                    raise EnvironmentBringUpError(
+                    raise self._failure(
                         f"Repo {self.repo!r}: service {service!r} was not ready {check.timeout:.0f}s after start "
-                        f"(its readiness check never passed). Last log lines: {self._redacted(self._last_log_lines(service))}"
+                        f"(its readiness check never passed). Last log lines: {self._redacted(self._last_log_lines(service))}",
+                        last, daemon_only=True,
                     )
                 self._sleep(check.interval)
             self.ready.append(
@@ -437,9 +481,11 @@ class Environment:
         )
         shown = self._redacted(seed.command[2] if seed.command[:2] == ("sh", "-c") else shlex.join(seed.command))
         if code != 0:
-            raise EnvironmentBringUpError(
+            # Classified like a service that would not start (#51): a host or network fault is
+            # `infra-failure`; anything else may be the Story's branches, so it is retried at Base.
+            raise self._failure(
                 f"Repo {self.repo!r}: its seed command in service {seed.service!r} failed with exit status "
-                f"{code} ({shown}): {self._redacted(_tail(out))}"
+                f"{code} ({shown}): {self._redacted(_tail(out))}", self._redacted(out),
             )
         self.seeded = SeedRun(self.repo, seed.service, shown, self._now(), self._clock() - started)
         return self.seeded
@@ -450,9 +496,9 @@ class Environment:
         code, out = self.sandbox.run(self._compose("ps", "-a", "-q", service), cwd="/")
         ids = out.split() if code == 0 else []
         if not ids:
-            raise EnvironmentBringUpError(
+            raise self._failure(
                 f"Repo {self.repo!r}: service {service!r} has no container to join the Environment network "
-                f"({_tail(out, 300) or 'none were created'})"
+                f"({self._redacted(_tail(out, 300)) or 'none were created'})", out,
             )
         for cid in ids:
             code, out = self.sandbox.run(
@@ -460,9 +506,9 @@ class Environment:
                 cwd="/",
             )
             if code != 0:
-                raise EnvironmentBringUpError(
+                raise self._failure(
                     f"Repo {self.repo!r}: service {service!r} could not join the Environment network "
-                    f"as {service}.{self.repo}: {_tail(out, 300)}"
+                    f"as {service}.{self.repo}: {self._redacted(_tail(out, 300))}", out,
                 )
         return ids
 
@@ -479,11 +525,12 @@ class Environment:
             )
             ip = out.strip()
             if code != 0 or not ip:
-                raise EnvironmentBringUpError(
+                raise self._failure(
                     f"Repo {self.repo!r}: service {service!r} has no address on the Environment network "
-                    f"({_tail(out, 300)})"
+                    f"({self._redacted(_tail(out, 300))})", out,
                 )
             lines.append(f"{ip} {service}.{self.repo}")
+        self._hosts_lines.extend(lines)
         entries = " ".join(shlex.quote(line) for line in lines)
         code, out = self.sandbox.run(f"printf '%s\\n' {entries} >> /etc/hosts", cwd="/")
         if code != 0:
@@ -497,6 +544,28 @@ class Environment:
             self._compose("logs", "--no-color", "--tail", str(LOG_TAIL_LINES), service), cwd="/"
         )
         return _tail(out) if code == 0 else f"(logs could not be read: {_tail(out, 300)})"
+
+    def tear_down(self) -> None:
+        """Remove this Repo's containers and volumes and the addresses it added to the sandbox's
+        /etc/hosts, so a second bring-up of the same Repo starts clean (#51). Raises
+        EnvironmentBringUpError (`infra-failure`) if the engine will not: a retry on top of the old
+        containers would prove nothing."""
+        if self.recipe is None or not self.recipe.services:
+            return
+        code, out = self.sandbox.run(self._compose("down", "-v", "--remove-orphans"), timeout=300, cwd="/")
+        if code != 0:
+            raise EnvironmentBringUpError(
+                f"Repo {self.repo!r}: its first Environment could not be taken down before the retry at Base: "
+                f"{self._redacted(_tail(out, 300))}", Outcome.INFRA_FAILURE,
+            )
+        if self._hosts_lines:
+            # Not `sed -i`: /etc/hosts is a bind mount and cannot be replaced, only rewritten.
+            drop = " ".join(f"-e {shlex.quote(line)}" for line in self._hosts_lines)
+            self.sandbox.run(
+                f"grep -v -x -F {drop} /etc/hosts > /tmp/hosts.keep; cat /tmp/hosts.keep > /etc/hosts", cwd="/"
+            )
+            self._hosts_lines.clear()
+        self.ready.clear()
 
     def save_logs(self, destination: Path) -> dict[str, str]:
         """Write each service's log to `destination/<repo>/<service>.log` (outside the sandbox).
@@ -559,10 +628,18 @@ class Placement:
         return {"repo": self.repo, "source": self.source, "branch": self.branch, "touched": self.touched}
 
 
-def place(repo: str, touched: Mapping[str, Any], working_on: str, base_branch_of: Callable[[str], str]) -> Placement:
+def place(
+    repo: str, touched: Mapping[str, Any], working_on: str, base_branch_of: Callable[[str], str],
+    all_at_base: bool = False,
+) -> Placement:
     """The agent's working copy for the Repo being worked on; the Task branch (the Integration
     branch) for another Repo the Story touches; the Base branch for any Repo the Story does not
-    touch. An Environment therefore never holds another Story's unmerged work (ADR 0004)."""
+    touch. An Environment therefore never holds another Story's unmerged work (ADR 0004).
+
+    `all_at_base` is the retry of #51: every Repo, touched or not, at its Base branch, in a checkout
+    the agent does not edit."""
+    if all_at_base:
+        return Placement(repo, FROM_BASE_BRANCH, base_branch_of(repo), f"{CHECKOUT_DIR}/{repo}", repo in touched)
     if repo == working_on:
         return Placement(repo, FROM_WORKING_COPY, touched[repo].integration_branch, f"{WORKDIR}/{repo}", True)
     path = f"{CHECKOUT_DIR}/{repo}"
@@ -576,6 +653,7 @@ def resolve_environment(
     working_on: str,
     base_branch_of: Callable[[str], str],
     load: Callable[[Placement], Recipe | None],
+    all_at_base: bool = False,
 ) -> list[tuple[Placement, Recipe]]:
     """The Repos of the Environment with their recipes, dependencies before the Repos that need them.
 
@@ -594,7 +672,7 @@ def resolve_environment(
         if repo in done:
             return
         if repo not in loaded:
-            placement = place(repo, touched, working_on, base_branch_of)
+            placement = place(repo, touched, working_on, base_branch_of, all_at_base)
             loaded[repo] = (placement, load(placement))
         placement, recipe = loaded[repo]
         if recipe is None:
