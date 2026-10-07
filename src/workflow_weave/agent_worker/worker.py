@@ -203,6 +203,9 @@ class AgentWorker:
             env, dropped = without_code_host_tokens({**run.lease.env, "ACP_PROMPT_MAX_RETRIES": "0"})
             if dropped:
                 self._note(rec, f"left out of the sandbox environment (Tracker / Code host tokens): {dropped}")
+            if removed := sorted(k for k in env if k in profile.sandbox_env_removed):
+                env = {k: v for k, v in env.items() if k not in removed}
+                self._note(rec, f"left out of the sandbox environment (Agent profile {profile.name}): {removed}")
             sandbox = Sandbox(
                 image=profile.image,
                 run_id=rec.run_id,

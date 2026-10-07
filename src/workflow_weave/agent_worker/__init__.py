@@ -14,6 +14,7 @@ from .config import (
     ProductConfigError,
     RepoConfig,
     WorkerSettings,
+    claude_code_profile,
     load_product_config,
 )
 from .subscriptions import (
@@ -61,6 +62,7 @@ __all__ = [
     "SubscriptionStore",
     "UnknownRun",
     "WorkerSettings",
+    "claude_code_profile",
     "load_product_config",
     "load_configured_subscription_store",
     "load_subscription_store",

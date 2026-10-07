@@ -37,6 +37,10 @@ ROOT = Path(__file__).resolve().parent.parent
 _TAG = os.environ.get("WEAVE_TEST_IMAGE_TAG", "test")
 SANDBOX_IMAGE = f"weave/sandbox:{_TAG}"
 PROBE_IMAGE = f"weave/probe-agent:{_TAG}"
+CLAUDE_CODE_IMAGE = f"weave/claude-code:{_TAG}"
+# The Claude Code image with the probe added: what the Claude Code Agent profile's
+# sandbox gives an agent, seen by the probe instead of Claude Code.
+PROBE_CLAUDE_CODE_IMAGE = f"weave/probe-claude-code:{_TAG}"
 PRODUCT = "probe-product"
 # The Subscription the default Product leases: roomy enough never to be full.
 PROBE_SUBSCRIPTION = "probe-subscription"
@@ -51,13 +55,38 @@ def _docker_build(tag: str, context: Path, build_args: dict[str, str]) -> None:
     subprocess.run([*cmd, str(context)], check=True, capture_output=True, text=True)
 
 
+def _building() -> bool:
+    return os.environ.get("WEAVE_TEST_SKIP_BUILD") != "1"
+
+
 @pytest.fixture(scope="session")
-def probe_image() -> str:
-    if os.environ.get("WEAVE_TEST_SKIP_BUILD") != "1":
+def sandbox_image() -> str:
+    if _building():
         base = os.environ.get("WEAVE_TEST_BASE_IMAGE", "ubuntu:24.04")
         _docker_build(SANDBOX_IMAGE, ROOT / "sandbox", {"BASE_IMAGE": base})
-        _docker_build(PROBE_IMAGE, ROOT / "tests" / "probe", {"SANDBOX_IMAGE": SANDBOX_IMAGE})
+    return SANDBOX_IMAGE
+
+
+@pytest.fixture(scope="session")
+def probe_image(sandbox_image: str) -> str:
+    if _building():
+        _docker_build(PROBE_IMAGE, ROOT / "tests" / "probe", {"SANDBOX_IMAGE": sandbox_image})
     return PROBE_IMAGE
+
+
+@pytest.fixture(scope="session")
+def claude_code_image(sandbox_image: str) -> str:
+    """The Claude Code Agent profile's image (sandbox/claude-code/), with its pinned agent CLIs."""
+    if _building():
+        _docker_build(CLAUDE_CODE_IMAGE, ROOT / "sandbox" / "claude-code", {"SANDBOX_IMAGE": sandbox_image})
+    return CLAUDE_CODE_IMAGE
+
+
+@pytest.fixture(scope="session")
+def probe_claude_code_image(claude_code_image: str) -> str:
+    if _building():
+        _docker_build(PROBE_CLAUDE_CODE_IMAGE, ROOT / "tests" / "probe", {"SANDBOX_IMAGE": claude_code_image})
+    return PROBE_CLAUDE_CODE_IMAGE
 
 
 @pytest.fixture(scope="session")
@@ -136,13 +165,14 @@ def make_worker(
         *,
         product_yaml: str | None = None,
         central_skills_location: Path = REPO_CENTRAL_SKILLS,
+        agent_profiles: dict[str, AgentProfile] | None = None,
     ) -> AgentWorker:
         settings = WorkerSettings(
             runs_dir=runs_dir,
             products={
                 name: product_config(name, product_yaml if i == 0 else None) for i, name in enumerate(products)
             },
-            agent_profiles={"probe": probe_profile},
+            agent_profiles={"probe": probe_profile, **(agent_profiles or {})},
             subscriptions=subscriptions or load_subscription_store(default_store),
             sandbox_nofile_limit=_nofile_limit(),
             central_skills_location=central_skills_location,
@@ -166,11 +196,12 @@ def probe_request(
     product: str = PRODUCT,
     skill: str = "implement-spec",
     repos: list[str] = ("app",),
+    agent_profile: str = "probe",
 ) -> RunRequest:
     """A run request whose spec tells the probe how to behave."""
     return RunRequest(
         product=product,
-        agent_profile="probe",
+        agent_profile=agent_profile,
         repos=[RepoTarget(name=r, integration_branch=branch, base_branch="main") for r in repos],
         skill=skill,
         inputs=RunInputs(spec=f"A spec for the probe.\nprobe: {json.dumps(script)}\n", tasks=["Task one"]),
