@@ -113,7 +113,7 @@ def make_worker(
     tmp_path: Path, runs_dir: Path, onboarded_repo: Path, probe_profile: AgentProfile
 ) -> Callable[..., AgentWorker]:
     """Build a worker. `products` names Products that each have the onboarded Repo
-    (`product_yaml`, if given, replaces PRODUCT's config); `subscriptions` is the
+    (`product_yaml`, if given, replaces the first Product's config); `subscriptions` is the
     Subscription store (default: one roomy Subscription for PRODUCT)."""
     default_store = tmp_path / "subscriptions.yaml"
     default_store.write_text(
@@ -124,7 +124,7 @@ def make_worker(
 
     def product_config(name: str, product_yaml: str | None):
         product_file = tmp_path / f"product-{name}.yaml"
-        if product_yaml is not None and name == PRODUCT:
+        if product_yaml is not None:
             product_file.write_text(product_yaml)
         else:
             product_file.write_text(f"product: {name}\nrepos:\n  app:\n    source: {onboarded_repo}\n")
@@ -139,7 +139,9 @@ def make_worker(
     ) -> AgentWorker:
         settings = WorkerSettings(
             runs_dir=runs_dir,
-            products={name: product_config(name, product_yaml) for name in products},
+            products={
+                name: product_config(name, product_yaml if i == 0 else None) for i, name in enumerate(products)
+            },
             agent_profiles={"probe": probe_profile},
             subscriptions=subscriptions or load_subscription_store(default_store),
             sandbox_nofile_limit=_nofile_limit(),
@@ -187,6 +189,32 @@ def wait_for(predicate: Callable[[], object], timeout: float = 120, interval: fl
 
 def wait_until_ended(worker: AgentWorker, run_id: str, timeout: float = 180):
     return wait_for(lambda: (s := worker.status(run_id)).is_final and s, timeout, what=f"run {run_id} to end")
+
+
+def wait_until_hanging(worker: AgentWorker, run_id: str, command: str) -> str:
+    """Wait until a hang-scripted probe is running its command; return the run's sandbox.
+
+    Watches the run's live event log for the probe's "hanging command" tool call
+    (sent just after the command started) rather than polling the sandbox, and fails
+    at once if the run ends first. The budget covers a slow sandbox start under load.
+    """
+    budget = worker.settings.sandbox_start_timeout + 180
+
+    def hanging() -> bool:
+        status = worker.status(run_id)
+        assert not status.is_final, f"run ended before its command hung: {status}"
+        log = worker.record(run_id).event_log
+        if not log or not log.exists():
+            return False
+        return any(
+            f'"hanging command: {command}"' in line and '"ACPToolCallEvent"' in line
+            for line in log.read_text().splitlines()
+        )
+
+    wait_for(hanging, budget, interval=1.0, what=f"run {run_id}'s command `{command}` to hang")
+    [sandbox] = sandboxes_of(run_id)
+    assert command in sandbox_processes(sandbox)
+    return sandbox
 
 
 # --------------------------------------------------------------------------- Sandbox host views

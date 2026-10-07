@@ -73,7 +73,20 @@ class NoCapacity:
     subscriptions: list[str]
 
 
-StartResult = Started | NoCapacity
+@dataclass(frozen=True)
+class NeedsSetup:
+    """`start` refused the run before starting a sandbox: something a human must
+    set up is missing (a Repo's `CONTEXT.md`, the Product's Subscription for the
+    agent). Its outcome is `needs-setup`; `reason` names what to fix."""
+
+    reason: str
+
+    @property
+    def outcome(self) -> "Outcome":
+        return Outcome.NEEDS_SETUP
+
+
+StartResult = Started | NoCapacity | NeedsSetup
 
 
 @dataclass(frozen=True)

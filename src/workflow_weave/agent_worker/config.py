@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Mapping
 
 import yaml
 
+from .model import Outcome
+from .outcomes import CLAUDE_AGENT_ACP_ERROR_KINDS
 from .subscriptions import SubscriptionStore
 
 
@@ -77,7 +80,9 @@ class AgentProfile:
     """How to run one agent in a sandbox: its image and ACP command.
 
     `agent` is the agent provider whose Subscriptions it runs on (e.g.
-    `claude-code`); it defaults to the profile's name.
+    `claude-code`); it defaults to the profile's name. `error_kinds` maps the
+    agent's own error kinds to the outcome they mean; any other kind is an
+    infra-failure. The default is claude-agent-acp's vocabulary.
     """
 
     name: str
@@ -85,6 +90,7 @@ class AgentProfile:
     acp_command: list[str]
     acp_session_mode: str | None = None
     agent: str | None = None
+    error_kinds: Mapping[str, Outcome] = field(default_factory=lambda: dict(CLAUDE_AGENT_ACP_ERROR_KINDS))
 
     @property
     def agent_provider(self) -> str:

@@ -16,6 +16,13 @@ claude-agent-acp, Cursor's `agent acp`). On each prompt it:
    - ``{"end": "hang", "command": "sleep 600"}``  runs a command that never
      finishes and waits on it. Like Claude Code, an ACP ``session/cancel``
      (an interrupt) does NOT stop the command; only closing the agent does.
+   - ``{"end": "error", "errorKind": "rate_limit", "message": "..."}``  fails
+     the prompt the way claude-agent-acp fails a turn: a JSON-RPC internal
+     error (-32603, which the SDK retries unless ``ACP_PROMPT_MAX_RETRIES``
+     caps it) with the message as its text and ``{"errorKind": "..."}`` as its
+     data (``"errorKind": null`` sends no data; ``"code"`` changes the JSON-RPC
+     code, e.g. -32000, ACP's "authentication required"). Every attempt is counted in
+     ``/tmp/probe-prompt-attempts``.
 
 Add a new report item by adding a function to ``REPORTERS``.
 """
@@ -36,6 +43,7 @@ from typing import Any, Callable
 
 from acp import (
     InitializeResponse,
+    RequestError,
     NewSessionResponse,
     PromptResponse,
     run_agent,
@@ -146,6 +154,19 @@ def tree_digest(root: Path) -> str:
     return h.hexdigest()
 
 
+PROMPT_ATTEMPTS = Path("/tmp/probe-prompt-attempts")
+
+
+def _count_attempt() -> None:
+    with open(PROMPT_ATTEMPTS, "a") as f:
+        f.write("prompt\n")
+
+
+def report_prompt_attempts(ctx: dict[str, Any]) -> Any:
+    """How many times this sandbox's agent has been prompted (retries included)."""
+    return len(PROMPT_ATTEMPTS.read_text().splitlines()) if PROMPT_ATTEMPTS.exists() else 0
+
+
 REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "earlier_run_markers": report_earlier_run,
     "env_names": report_env_names,
@@ -156,6 +177,7 @@ REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "user_skills": report_user_skills,
     "skills_loaded": report_skills_loaded,
     "working_copies": report_working_copies,
+    "prompt_attempts": report_prompt_attempts,
 }
 
 
@@ -224,6 +246,7 @@ class ProbeAgent:
 
     async def prompt(self, session_id: str, prompt: list[Any], **kwargs: Any) -> PromptResponse:
         text = "\n".join(getattr(b, "text", "") or "" for b in prompt)
+        _count_attempt()
         script = parse_script(text)
         report = build_report({"cwd": self._cwd, "script": script, "prompt": text})
         leave_markers()
@@ -260,6 +283,12 @@ class ProbeAgent:
             while proc.poll() is None:
                 await asyncio.sleep(0.5)
             return PromptResponse(stop_reason="end_turn")
+        if end == "error":
+            kind = script.get("errorKind", "authentication_failed")
+            message = script.get("message", f"the probe was told to fail with {kind}")
+            # Exactly how claude-agent-acp fails a turn: RequestError.internalError({errorKind}, resultText).
+            code = int(script.get("code", -32603))
+            raise RequestError(code, message, {"errorKind": kind} if kind else None)
         raise ValueError(f"unknown probe end: {end!r}")
 
     def kill_commands(self) -> None:

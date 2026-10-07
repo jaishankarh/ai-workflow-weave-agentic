@@ -52,7 +52,8 @@ class Sandbox:
         self._api_key = secrets.token_urlsafe(24)
         port = _free_port()
         cmd = [
-            "run", "-d", "--rm",
+            # No --rm: a sandbox that dies keeps its logs for the run's reason; destroy() removes it.
+            "run", "-d",
             "--name", f"weave-run-{run_id}",
             "--label", f"{LABEL_RUN_ID}={run_id}",
             "--label", f"{LABEL_PRODUCT}={product}",
@@ -84,10 +85,8 @@ class Sandbox:
                     return
             except Exception:
                 pass
-            state = _docker("inspect", "-f", "{{.State.Running}}", self.container_id).stdout.strip()
-            if state != "true":
-                logs = _docker("logs", "--tail", "50", self.container_id)
-                raise SandboxError(f"sandbox stopped while starting: {logs.stdout[-2000:]}{logs.stderr[-2000:]}")
+            if how := self.stopped():
+                raise SandboxError(f"{how} while starting: {self.last_logs()}")
             time.sleep(0.5)
         raise SandboxError(f"sandbox did not become healthy within {timeout:.0f}s")
 
@@ -123,6 +122,21 @@ class Sandbox:
                 continue
             out.append(args)
         return out
+
+    def stopped(self) -> str | None:
+        """None while the sandbox is running; otherwise how it stopped."""
+        r = _docker("inspect", "-f", "{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}", self.container_id)
+        if r.returncode != 0:
+            return "sandbox is gone from the Sandbox host"
+        running, code, oom = (r.stdout.split() + ["", "", ""])[:3]
+        if running == "true":
+            return None
+        return f"sandbox stopped (exit code {code}{', out of memory' if oom == 'true' else ''})"
+
+    def last_logs(self, chars: int = 1500) -> str:
+        """The end of the agent-server's output, for a reason."""
+        logs = _docker("logs", "--tail", "40", self.container_id)
+        return (logs.stdout + logs.stderr).strip()[-chars:]
 
     def destroy(self) -> None:
         _docker("rm", "-f", self.container_id, timeout=60)

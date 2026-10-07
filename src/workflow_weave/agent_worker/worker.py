@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -15,17 +16,17 @@ from openhands.sdk.agent import ACPAgent
 from openhands.sdk.conversation.response_utils import get_agent_final_response
 
 from .config import WorkerSettings
-from .model import NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
-from .sandbox import Sandbox, stage_skills
+from .model import NeedsSetup, NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
+from .outcomes import DONE_MARK, GAVE_UP_MARK, classify_error, classify_final_reply, last_error_detail
+from .sandbox import Sandbox, SandboxError, stage_skills
 from .subscriptions import Lease
 from .staging import StagingError, StagingPlan, central_skills_version, read_repo_skills
 from .staging import plan as plan_skills
 from workflow_weave.central_skills import CentralSkills
 
 TERMINAL = {"finished", "error", "stuck"}
-# The agent is asked to end its last reply with one of these lines.
-DONE_MARK = "RUN-OUTCOME: done"
-GAVE_UP_MARK = "RUN-OUTCOME: gave-up"
+# How often a running run checks that its sandbox is still alive.
+SANDBOX_CHECK_INTERVAL = 5.0
 
 
 def _now() -> str:
@@ -79,6 +80,8 @@ class AgentWorker:
 
         store = self.settings.subscriptions
         agent = profile.agent_provider
+        if problem := self._needs_setup(request, product, agent):
+            return NeedsSetup(problem)
         lease = store.lease(request.product, agent)
         if lease is None:
             return NoCapacity(request.product, agent, store.associated(request.product, agent))
@@ -87,6 +90,32 @@ class AgentWorker:
         except BaseException:
             store.release(lease)
             raise
+
+    def _needs_setup(self, request: RunRequest, product: Any, agent: str) -> str | None:
+        """The pre-checks: what a human must set up before this run can start, or None.
+
+        Checked in order, from the Sandbox host alone (no sandbox, no lease):
+        the Product has a Subscription for the agent; every Repo has a
+        `CONTEXT.md` on its Base branch.
+        """
+        if not self.settings.subscriptions.associated(request.product, agent):
+            return (
+                f"Product {request.product!r} has no Subscription associated for agent {agent!r}: "
+                f"associate one in the Subscription store"
+            )
+        missing = []
+        for target in request.repos:
+            source = product.repos[target.name].source
+            if _missing_on_branch(source, target.base_branch, "CONTEXT.md"):
+                missing.append(target.name)
+        if missing:
+            names = ", ".join(repr(m) for m in missing)
+            branches = ", ".join(sorted({t.base_branch for t in request.repos if t.name in missing}))
+            return (
+                f"Repo {names} has no CONTEXT.md on its Base branch ({branches}): "
+                f"onboard it (e.g. setup-matt-pocock-skills) before running agents on it"
+            )
+        return None
 
     def _launch(self, request: RunRequest, lease: Lease) -> Started:
         run_id = _new_run_id()
@@ -162,7 +191,7 @@ class AgentWorker:
                 run_id=rec.run_id,
                 product=rec.product,
                 # The credential goes in as sandbox environment only (ADR 0010, #13).
-                env={"ACP_PROMPT_MAX_RETRIES": "0", **run.lease.env},
+                env={**run.lease.env, "ACP_PROMPT_MAX_RETRIES": "0"},
                 nofile_limit=self.settings.sandbox_nofile_limit,
                 start_timeout=self.settings.sandbox_start_timeout,
             )
@@ -181,14 +210,16 @@ class AgentWorker:
             )
             conversation.send_message(_prompt(run.request))
             conversation.run(blocking=False)
-            status = self._wait(conversation, run)
+            status = self._wait(conversation, run, sandbox)
             if status is None:
                 raise _Cancelled
             log.rewrite(conversation.state.events)
-            final = (RunState.ENDED, *_classify(status, conversation))
+            final = (RunState.ENDED, *_classify(status, conversation, profile.error_kinds))
         except _Cancelled:
             final = (RunState.CANCELLED, None, "cancelled")
-        except Exception as e:  # anything that broke the run's infrastructure
+        except SandboxError as e:
+            final = (RunState.ENDED, Outcome.INFRA_FAILURE, f"sandbox failure: {e}"[:2000])
+        except Exception as e:  # anything else that broke the run's infrastructure
             final = (RunState.ENDED, Outcome.INFRA_FAILURE, f"{type(e).__name__}: {e}"[:2000])
         finally:
             leftovers = self._stop(conversation, sandbox, rec)
@@ -201,14 +232,26 @@ class AgentWorker:
         self._save(rec)
         run.done.set()
 
-    def _wait(self, conversation: Any, run: _Run) -> str | None:
-        """Wait for the conversation to end; None if the run was cancelled first."""
+    def _wait(self, conversation: Any, run: _Run, sandbox: Sandbox) -> str | None:
+        """Wait for the conversation to end; None if the run was cancelled first.
+
+        Raises SandboxError if the sandbox dies first.
+        """
+        next_check = time.monotonic() + SANDBOX_CHECK_INTERVAL
         while True:
             if run.cancel_requested.wait(0.5):
                 return None
-            status = str(conversation.state.execution_status.value).lower()
+            try:
+                status = str(conversation.state.execution_status.value).lower()
+            except Exception:
+                status = None  # the agent-server did not answer; the sandbox check decides
+                next_check = 0.0
             if status in TERMINAL:
                 return status
+            if time.monotonic() >= next_check:
+                if how := sandbox.stopped():
+                    raise SandboxError(f"{how} mid-run: {sandbox.last_logs(500)}")
+                next_check = time.monotonic() + SANDBOX_CHECK_INTERVAL
 
     def _stop(self, conversation: Any, sandbox: Sandbox | None, rec: RunRecord) -> list[str] | None:
         """Close the conversation (never just interrupt it, #13), then remove the sandbox."""
@@ -264,6 +307,19 @@ class AgentWorker:
             f.write(f"{_now()} {line}\n")
 
 
+def _missing_on_branch(source: str, branch: str, path: str) -> bool:
+    """True when a readable Repo's branch has no file at `path`.
+
+    A Repo or branch that cannot be read at all is left for the run itself to
+    report (as an infra-failure), not refused here.
+    """
+    if subprocess.run(
+        ["git", "-C", source, "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}"], capture_output=True
+    ).returncode != 0:
+        return False
+    return subprocess.run(["git", "-C", source, "cat-file", "-e", f"{branch}:{path}"], capture_output=True).returncode != 0
+
+
 def _settle(probe: Any, timeout: float = 10.0) -> list[str]:
     """Processes left once the agent has had a moment to exit after close."""
     deadline = time.monotonic() + timeout
@@ -313,16 +369,12 @@ def _prompt(request: RunRequest) -> str:
     )
 
 
-def _classify(status: str, conversation: Any) -> tuple[Outcome, str | None]:
-    """Turn how the conversation ended into one outcome. #38 refines this."""
-    if status != "finished":
-        return Outcome.INFRA_FAILURE, f"conversation ended as {status}"
-    reply = get_agent_final_response(conversation.state.events) or ""
-    lines = [line.strip() for line in reply.strip().splitlines() if line.strip()]
-    last = lines[-1] if lines else ""
-    if last == DONE_MARK:
-        return Outcome.SUCCEEDED, None
-    if last.startswith(GAVE_UP_MARK):
-        why = last[len(GAVE_UP_MARK):].lstrip(": ").strip()
-        return Outcome.AGENT_GAVE_UP, f"agent gave up: {why or 'no reason given'}"
-    return Outcome.AGENT_GAVE_UP, "agent ended without reporting the skill complete"
+def _classify(status: str, conversation: Any, error_kinds: Any) -> tuple[Outcome, str | None]:
+    """Turn how the conversation ended into one outcome, from the agent's own error kind."""
+    events = conversation.state.events
+    if status == "finished":
+        return classify_final_reply(get_agent_final_response(events) or "")
+    detail = last_error_detail(events)
+    if detail is not None:
+        return classify_error(detail, error_kinds)
+    return Outcome.INFRA_FAILURE, f"the agent failed: its conversation ended as {status} with no error reported"
