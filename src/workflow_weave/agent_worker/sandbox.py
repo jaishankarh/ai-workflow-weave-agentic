@@ -9,6 +9,7 @@ and so the open-files limit is a setting, then talk to it through the SDK's
 from __future__ import annotations
 
 import secrets
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -163,3 +164,27 @@ def stage_skills(sandbox: Sandbox, plan) -> None:
         remote = "/tmp/weave-staging/skills.tar"
         sandbox.workspace.file_upload(archive, remote)
     sandbox.sh(f'mkdir -p "{USER_SKILLS_DIR}" && tar -xf {remote} -C "{USER_SKILLS_DIR}" && rm -f {remote}', cwd="/")
+    if plan.hidden_repo_skills:
+        turn_off_skills(sandbox, plan.hidden_repo_skills)
+
+
+# Edits the agent's user-level settings (Claude Code's `~/.claude/settings.json`).
+_TURN_OFF = """import json, os, sys
+path = os.path.expanduser("~/.claude/settings.json")
+settings = json.load(open(path)) if os.path.exists(path) else {}
+settings.setdefault("skillOverrides", {}).update({name: "off" for name in sys.argv[1:]})
+os.makedirs(os.path.dirname(path), exist_ok=True)
+json.dump(settings, open(path, "w"), indent=2)
+"""
+
+
+def turn_off_skills(sandbox: Sandbox, names: list[str]) -> None:
+    """Turn skills off in the agent's user-level settings (Claude Code's `skillOverrides`):
+    not listed to the agent, and refused if it asks for one by name."""
+    with tempfile.TemporaryDirectory() as tmp:
+        script = Path(tmp) / "turn_off_skills.py"
+        script.write_text(_TURN_OFF)
+        remote = "/tmp/weave-staging/turn_off_skills.py"
+        sandbox.workspace.file_upload(script, remote)
+    args = " ".join(shlex.quote(n) for n in names)
+    sandbox.sh(f"python3 {remote} {args} && rm -f {remote}", cwd="/")

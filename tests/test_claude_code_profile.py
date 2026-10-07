@@ -175,3 +175,74 @@ def test_permissions_are_auto_approved_and_a_run_needs_no_interactive_input(
 
     assert final.outcome is Outcome.SUCCEEDED, final.reason
     assert "seen: RAN-42, WROTE-OUTSIDE" in agent_said(record.event_log)
+
+
+def clash_fixture(tmp_path: Path, override: bool):
+    """Central skills and a Repo that both have a `clash` skill; the run's skill calls it."""
+    from conftest import make_repo
+
+    def skill(name: str, body: str) -> str:
+        return f"---\nname: {name}\ndescription: the {name} skill\n---\n\n{body}\n"
+
+    central = tmp_path / "central" / "skills"
+    for rel, text in {
+        "upstream/UPSTREAM.json": '{"repository": "https://example.invalid/skills.git", "commit": "%s"}' % ("b" * 40),
+        "upstream/engineering/work/SKILL.md": skill("work", "Call the Skill tool with `clash`."),
+        "upstream/engineering/clash/SKILL.md": skill("clash", "CENTRAL-CLASH-BODY"),
+    }.items():
+        (central / rel).parent.mkdir(parents=True, exist_ok=True)
+        (central / rel).write_text(text)
+    repo = make_repo(tmp_path / "clash-repos" / "app", {
+        "CONTEXT.md": "# Context: app\n", "README.md": "README-OF-APP\n",
+        ".claude/skills/clash/SKILL.md": skill("clash", "REPO-CLASH-BODY"),
+    })
+    product = f"product: {PRODUCT}\nrepos:\n  app:\n    source: {repo}\n"
+    if override:
+        product += "    skill_overrides: [clash]\n"
+    return central, product
+
+
+# What the agent does: read a file in the Repo (Claude Code then discovers the Repo's own
+# skills), load `clash` by name, and try the Repo's directory-scoped variant by its own name.
+CLASH_TURNS = [
+    {"tool": "Read", "input": {"file_path": "/workspace/app/README.md"}},
+    {"tool": "Skill", "input": {"skill": "clash"}},
+    {"tool": "Skill", "input": {"skill": "app:clash"}},
+    {"seen": ["README-OF-APP", "CENTRAL-CLASH-BODY", "REPO-CLASH-BODY", "Directory-scoped variants"]},
+]
+
+
+def test_with_a_central_and_a_project_skill_of_the_same_name_claude_code_loads_the_central_one(
+    make_worker, claude_code_on_fake_api, tmp_path
+):
+    central, product = clash_fixture(tmp_path, override=False)
+    store = subscription_store(tmp_path, {"CLAUDE_CODE_OAUTH_TOKEN": FAKE_TOKEN})
+    worker = make_worker(subscriptions=store, agent_profiles={"claude-code": claude_code_on_fake_api},
+                         product_yaml=product, central_skills_location=central)
+    try:
+        started = worker.start(probe_request({"turns": CLASH_TURNS}, agent_profile="claude-code", skill="work"))
+        final = wait_until_ended(worker, started.run_id)
+        said = agent_said(worker.record(started.run_id).event_log)
+    finally:
+        worker.shutdown()
+
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+    # The central skill loads, and Claude Code is neither shown nor able to load the
+    # Repo's same-named skill.
+    assert "seen: README-OF-APP, CENTRAL-CLASH-BODY\n" in said, said
+
+
+def test_with_a_skill_override_claude_code_loads_the_repos_own_skill(make_worker, claude_code_on_fake_api, tmp_path):
+    central, product = clash_fixture(tmp_path, override=True)
+    store = subscription_store(tmp_path, {"CLAUDE_CODE_OAUTH_TOKEN": FAKE_TOKEN})
+    worker = make_worker(subscriptions=store, agent_profiles={"claude-code": claude_code_on_fake_api},
+                         product_yaml=product, central_skills_location=central)
+    try:
+        started = worker.start(probe_request({"turns": CLASH_TURNS}, agent_profile="claude-code", skill="work"))
+        final = wait_until_ended(worker, started.run_id)
+        said = agent_said(worker.record(started.run_id).event_log)
+    finally:
+        worker.shutdown()
+
+    assert final.outcome is Outcome.SUCCEEDED, final.reason
+    assert "REPO-CLASH-BODY" in said and "CENTRAL-CLASH-BODY" not in said, said
