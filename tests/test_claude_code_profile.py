@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from conftest import PRODUCT, make_repo, probe_reports, probe_request, wait_until_ended
+from conftest import PRODUCT, add_product_standards, make_repo, probe_reports, probe_request, wait_until_ended
 
 from workflow_weave.agent_worker import Outcome, RunInputs, claude_code_profile, load_subscription_store
 
@@ -190,6 +190,7 @@ def clash_fixture(tmp_path: Path, override: bool):
     }.items():
         (central / rel).parent.mkdir(parents=True, exist_ok=True)
         (central / rel).write_text(text)
+    add_product_standards(central, [PRODUCT])  # a run needs its Product's Coding standards (#41)
     repo = make_repo(tmp_path / "clash-repos" / "app", {
         "CONTEXT.md": "# Context: app\n", "README.md": "README-OF-APP\n",
         ".claude/skills/clash/SKILL.md": skill("clash", "REPO-CLASH-BODY"),
