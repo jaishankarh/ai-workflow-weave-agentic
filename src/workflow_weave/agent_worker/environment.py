@@ -29,6 +29,21 @@ reaches the agent's sandbox environment. A recipe never holds a value.
 Several Repos (#50): `x-weave.depends_on` lists the Repos this one needs (`depends_on: [svc]`); they
 are brought up first, each as its own Compose project. A recipe may have no services and only
 `depends_on`.
+
+Seeding (#53): every Environment starts from empty databases, and a Repo that needs data says how to
+put it there with a seed, a service and a command:
+
+    x-weave:
+      seed:
+        service: db                         # one of this recipe's own services
+        command: psql -U app -f /seed.sql   # string (sh -c) or list; timeout: seconds (default 300)
+
+It runs once, after all the Repos' services are ready, Repos in dependency order (a Repo is seeded
+after the Repos it depends on). It runs inside that service's own container, in the Repo's own
+Compose project, with only the Test secrets the recipe names (so a Repo has no credential for a
+sibling's databases). A Repo with nothing to seed omits the field. Tracked Seed scripts are Spec 2b
+(ADR 0011); the workflow only runs this command. `seed_in_dependency_order` is the one function that
+seeds, so `reset` can call it again after bringing everything up fresh.
 """
 
 from __future__ import annotations
@@ -37,7 +52,7 @@ import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 import yaml
 
@@ -65,6 +80,7 @@ DEFAULT_READY_INTERVAL = 1.0
 # How long `docker compose up` may take (it pulls and builds images).
 UP_TIMEOUT = 1800.0
 LOG_TAIL_LINES = 20
+DEFAULT_SEED_TIMEOUT = 300.0
 
 
 class RecipeError(ValueError):
@@ -96,6 +112,15 @@ class ReadinessCheck:
 
 
 @dataclass(frozen=True)
+class Seed:
+    """A Repo's seed: a command to run in one of its own services (#53)."""
+
+    service: str
+    command: tuple[str, ...]
+    timeout: float = DEFAULT_SEED_TIMEOUT
+
+
+@dataclass(frozen=True)
 class Recipe:
     repo: str
     services: tuple[str, ...]
@@ -103,6 +128,8 @@ class Recipe:
     depends_on: tuple[str, ...] = ()
     # Names of the Test secrets the recipe needs (never values).
     secrets: tuple[str, ...] = ()
+    # What to run once the services are ready (None: nothing to seed).
+    seed: Seed | None = None
 
 
 def parse_recipe(repo: str, text: str) -> Recipe:
@@ -146,7 +173,33 @@ def parse_recipe(repo: str, text: str) -> Recipe:
         readiness=readiness,
         depends_on=tuple(depends_on),
         secrets=_parse_secret_names(block, bad),
+        seed=_parse_seed(block, names, bad),
     )
+
+
+def _parse_seed(block: dict, services: tuple[str, ...], bad: Callable[[str], RecipeError]) -> Seed | None:
+    raw = block.get("seed")
+    if raw is None:
+        return None
+    where = f"`{WEAVE_KEY}.seed`"
+    if not isinstance(raw, dict):
+        raise bad(f"has {where} that is not a mapping with a `service` and a `command`")
+    service = raw.get("service")
+    if not isinstance(service, str) or not service:
+        raise bad(f"has {where} without a `service` (the recipe's own service to run the seed command in)")
+    if service not in services:
+        raise bad(f"has {where} naming service {service!r}, which the recipe does not define")
+    command = raw.get("command")
+    if isinstance(command, str) and command.strip():
+        argv: tuple[str, ...] = ("sh", "-c", command)
+    elif isinstance(command, list) and command and all(isinstance(c, str) for c in command):
+        argv = tuple(command)
+    else:
+        raise bad(f"has {where} without a `command` (a non-empty string, or a list of strings)")
+    timeout = raw.get("timeout", DEFAULT_SEED_TIMEOUT)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise bad(f"has {where} whose `timeout` is not a positive number of seconds")
+    return Seed(service, argv, float(timeout))
 
 
 
@@ -231,6 +284,23 @@ class ServiceReady:
         }
 
 
+@dataclass(frozen=True)
+class SeedRun:
+    """One Repo's seed command that ran to success."""
+
+    repo: str
+    service: str
+    command: str  # as the recipe wrote it, with any secret value redacted
+    seeded_at: str  # when it finished, UTC
+    seconds: float
+
+    def as_record(self) -> dict:
+        return {
+            "repo": self.repo, "service": self.service, "command": self.command,
+            "seeded_at": self.seeded_at, "seconds": self.seconds,
+        }
+
+
 class Environment:
     """One Repo's Run recipe, brought up inside the run's sandbox.
 
@@ -262,6 +332,8 @@ class Environment:
         self.recipe: Recipe | None = None
         # Services that passed their readiness check, in the order they did.
         self.ready: list[ServiceReady] = []
+        # The last seed that succeeded (None: no seed, or not seeded yet).
+        self.seeded: SeedRun | None = None
 
     def _compose(self, *args: str) -> str:
         return shlex.join(compose_args(self.repo, self._recipe_file, self._override_file) + list(args))
@@ -334,6 +406,43 @@ class Environment:
                 ServiceReady(self.repo, service, f"{service}.{self.repo}", self._now(), self._clock() - started)
             )
         return self.ready
+
+    def is_ready(self) -> bool:
+        """Brought up, with every service past its readiness check."""
+        return self.recipe is not None and {r.service for r in self.ready} == set(self.recipe.services)
+
+    def seed(self) -> SeedRun | None:
+        """Run the recipe's seed command once, in the named service of this Repo's own project.
+
+        Returns None if the recipe has no seed. Only when every service has passed its readiness
+        check: otherwise (or if the seed fails) EnvironmentBringUpError. The command sees the
+        recipe's named Test secrets and no others, and runs in this Repo's own container, so it
+        holds no credential for any other Repo's databases. Safe to call again for a reset.
+        """
+        if not self.is_ready():
+            raise EnvironmentBringUpError(
+                f"Repo {self.repo!r}: its seed command would run before its services are ready"
+            )
+        recipe = self.recipe
+        if recipe.seed is None:
+            return None
+        seed = recipe.seed
+        self.seeded = None
+        started = self._clock()
+        # `-e NAME` hands the named secret on to the command itself, not only to the container.
+        passed = [arg for name in recipe.secrets for arg in ("-e", name)]
+        code, out = self.sandbox.run(
+            self._with_secrets(self._compose("exec", "-T", *passed, seed.service, *seed.command), recipe),
+            timeout=seed.timeout, cwd="/",
+        )
+        shown = self._redacted(seed.command[2] if seed.command[:2] == ("sh", "-c") else shlex.join(seed.command))
+        if code != 0:
+            raise EnvironmentBringUpError(
+                f"Repo {self.repo!r}: its seed command in service {seed.service!r} failed with exit status "
+                f"{code} ({shown}): {self._redacted(_tail(out))}"
+            )
+        self.seeded = SeedRun(self.repo, seed.service, shown, self._now(), self._clock() - started)
+        return self.seeded
 
     def _attach(self, service: str) -> list[str]:
         """Join each of the service's containers to the Environment network as `<service>.<repo>`
@@ -418,6 +527,19 @@ class Environment:
 def _tail(text: str, chars: int = 800) -> str:
     text = (text or "").strip()
     return text[-chars:] if len(text) > chars else text
+
+
+def seed_in_dependency_order(environments: Sequence[Environment]) -> list[SeedRun]:
+    """Seed each Repo that has a seed command, in the order given: dependencies before the Repos
+    that need them (the order `resolve_environment` returns). Nothing is seeded until every Repo's
+    services are ready, so a Repo is never seeded against a sibling that is still starting; the
+    first failing seed stops the rest. `reset` calls this again after bringing everything up fresh."""
+    for environment in environments:
+        if not environment.is_ready():
+            raise EnvironmentBringUpError(
+                f"Repo {environment.repo!r}: its services are not ready, so no Repo is seeded yet"
+            )
+    return [run for environment in environments if (run := environment.seed())]
 
 
 # ---------------------------------------------------------------- which Repos, in what order, from where

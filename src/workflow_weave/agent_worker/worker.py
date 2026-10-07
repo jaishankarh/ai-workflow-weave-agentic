@@ -25,7 +25,7 @@ from .outcomes import (
 )
 from .environment import (
     FROM_BASE_BRANCH, FROM_TASK_BRANCH, RECIPE_PATH, Environment, EnvironmentBringUpError, LogsNotSaved, Placement,
-    Recipe, RecipeError, parse_recipe, resolve_environment,
+    Recipe, RecipeError, parse_recipe, resolve_environment, seed_in_dependency_order,
 )
 from .sandbox import WORKDIR, Sandbox, SandboxError, require_runtime, stage_skills, stage_user_files
 from . import standards
@@ -484,6 +484,20 @@ class AgentWorker:
             self._bring_up(rec, environment, recipe, environments)
             if run.cancel_requested.is_set():
                 raise _Cancelled
+        self._seed(rec, environments)
+        if run.cancel_requested.is_set():
+            raise _Cancelled
+
+    def _seed(self, rec: RunRecord, environments: list[Environment]) -> None:
+        """Seed once every Repo is ready, dependencies first (#53). `environments` is already in
+        dependency order. Each seed that ran is on the record, even when a later one failed."""
+        try:
+            seed_in_dependency_order(environments)
+        finally:
+            seeded = [e.seeded.as_record() for e in environments if e.seeded]
+            if seeded:
+                rec.environment_seeds = seeded
+                self._save(rec)
 
     def _secrets_for_recipe(self, run: _Run, repo: str, recipe: Recipe) -> dict[str, str]:
         """The Test secrets `recipe` (as it runs: a working copy, Task branch or a dependency's Base

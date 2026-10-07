@@ -229,7 +229,25 @@ x-weave:
 
 `command` is a string (run with `sh -c`) or a list (run as is). A recipe may have no services. It
 may also name the Repos it needs: `x-weave: {depends_on: [svc]}`. The other `x-weave` fields of
-Spec 2 (seed, databases, MCP servers) are not read yet; `secrets` is (next section).
+Spec 2 (databases, MCP servers) are not read yet; `secrets` is (next section), and so is `seed`:
+
+```yaml
+x-weave:
+  seed:
+    service: db                          # one of the recipe's own services
+    command: psql -U app -f /seed.sql    # string (sh -c) or list; timeout: seconds (default 300)
+```
+
+Every Environment starts from empty databases (tracked Seed scripts are Spec 2b, ADR 0011); schema
+creation is the recipe's or the app's job. Once every Repo's services are ready, each seed runs once,
+Repos in dependency order, so a Repo is seeded after the Repos it depends on and its seed command
+sees their data. It runs with `docker compose -p <repo> exec` in the named service of that Repo's
+own project, with only the Test secrets that recipe names (also handed to the command with `-e`),
+so a Repo's seed has no credential for a sibling's databases. This is placement and credential
+scoping, not a firewall: the network is open, so a recipe that hard-codes a sibling's credentials
+could still reach it. A failing seed ends the run before any agent starts (`needs-setup`, naming the
+Repo, service and output, secret values redacted). A Repo with no seed omits the field. The run
+record lists `environment_seeds` (Repo, service, command, `seeded_at`, `seconds`).
 
 Between staging the agent's files and starting the agent, the worker brings each such Repo's
 recipe up inside the sandbox as its own Compose project (`-p <repo>`), on a shared network
