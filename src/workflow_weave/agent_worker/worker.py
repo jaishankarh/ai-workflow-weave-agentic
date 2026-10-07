@@ -29,6 +29,7 @@ from .environment import (
 )
 from .sandbox import WORKDIR, Sandbox, SandboxError, require_runtime, stage_skills, stage_user_files
 from . import standards
+from .secret_store import SecretsError, redact
 from .subscriptions import Lease
 from . import local_tickets
 from .push_gateway import GATEWAY_HOST, PushGateway, RunRemotes, without_code_host_tokens
@@ -65,6 +66,9 @@ class _Run:
         self.cancel_requested = threading.Event()
         self.done = threading.Event()
         self.thread: threading.Thread | None = None
+        # Each Repo's Test secrets (name -> value) this run was given, kept only to start its
+        # services and to scrub values out of anything written down.
+        self.test_secrets: dict[str, dict[str, str]] = {}
 
 
 class AgentWorker:
@@ -150,7 +154,45 @@ class AgentWorker:
         )
         if absent:
             return "Coding standards missing: " + "; ".join(absent)
-        return None
+        problem, _ = self._test_secrets(request, product, refs)
+        return problem
+
+    def _test_secrets(
+        self, request: RunRequest, product: ProductConfig, refs: dict[str, str]
+    ) -> tuple[str | None, dict[str, dict[str, str]]]:
+        """The Test secrets this run's Repos need: (what a human must fix or None, Repo -> name -> value).
+
+        Each Repo's Run recipe on its Base branch names its secrets; a run is given those and only
+        those, from its own Product's file. Nothing here starts a sandbox. The Product's file is
+        read only when some recipe names a secret.
+        """
+        named = {
+            t.name: names
+            for t in request.repos
+            if (names := _recipe_secret_names(t.name, product.repos[t.name].source, refs[t.name]))
+        }
+        if not named:
+            return None, {}
+        store = self.settings.test_secrets
+        if store is None:
+            repo, names = next(iter(named.items()))
+            return (
+                f"Repo {repo!r} names Test secret {names[0]!r} but no Test secrets are configured "
+                f"(`test_secrets.location` in weave.yaml): add {request.product!r}'s Test secrets file",
+                {},
+            )
+        try:
+            have = store.for_product(request.product)
+        except SecretsError as e:
+            repo, names = next(iter(named.items()))
+            return f"Repo {repo!r} names Test secret {names[0]!r}: {e}", {}
+        lacking = [f"Repo {repo!r} names Test secret {n!r}" for repo, names in named.items() for n in have.missing(names)]
+        if lacking:
+            return (
+                "; ".join(lacking) + f" that Product {request.product!r} does not have: add it to {have.path}",
+                {},
+            )
+        return None, {repo: have.select(names) for repo, names in named.items()}
 
     def _central_location(self) -> Path | None:
         loc = self.settings.central_skills_location
@@ -237,6 +279,17 @@ class AgentWorker:
             # Only a run with a touched Repo that has a Run recipe gets an Environment, and so a
             # sandbox on sysbox; every other run stays on the default runtime, unchanged.
             with_recipe = [t.name for t in run.request.repos if _has_recipe(product.repos[t.name].source, refs[t.name])]
+            # The Test secrets the recipes name, from the Product's own file (the same check `start`
+            # made; repeated because the file may have changed since). Before any sandbox exists.
+            problem, run.test_secrets = self._test_secrets(run.request, product, refs)
+            if problem:
+                raise EnvironmentBringUpError(problem)
+            if run.test_secrets:
+                rec.test_secrets_given = {repo: sorted(given) for repo, given in run.test_secrets.items()}
+                self._save(rec)
+                for repo, given in rec.test_secrets_given.items():
+                    self._note(rec, f"Test secrets given to Repo {repo!r}'s services: {', '.join(given)} "
+                                    f"(names only; values are never recorded)")
             runtime = None
             if with_recipe:
                 runtime = self.settings.sandbox_runtime
@@ -350,6 +403,8 @@ class AgentWorker:
             if leftovers:
                 self._note(rec, f"processes still running after the agent was closed: {leftovers}")
             rec.state, rec.outcome, rec.reason = final
+            if rec.reason:
+                rec.reason = self._scrub(rec, rec.reason)
             rec.ended_at = _now()
             self._save(rec)
         finally:
@@ -421,11 +476,46 @@ class AgentWorker:
         rec.environment_repos = [p.as_record() for p, _ in placed]
         self._save(rec)
         for placement, recipe in placed:
-            environment = Environment(sandbox, placement.repo, now=_now, working_copy=placement.path)
+            given = self._secrets_for_recipe(run, placement.repo, recipe)
+            environment = Environment(
+                sandbox, placement.repo, now=_now, working_copy=placement.path, secrets=given
+            )
             environments.append(environment)
             self._bring_up(rec, environment, recipe, environments)
             if run.cancel_requested.is_set():
                 raise _Cancelled
+
+    def _secrets_for_recipe(self, run: _Run, repo: str, recipe: Recipe) -> dict[str, str]:
+        """The Test secrets `recipe` (as it runs: a working copy, Task branch or a dependency's Base
+        branch) names, from the Product's own file. Names the start-time check already resolved are
+        reused; others (a dependency Repo's, or one added on the branch) are read now and added to
+        what this run scrubs from everything it records."""
+        have = run.test_secrets.setdefault(repo, {})
+        wanted = [n for n in recipe.secrets if n not in have]
+        if wanted:
+            store = self.settings.test_secrets
+            if store is None:
+                raise EnvironmentBringUpError(
+                    f"Repo {repo!r} names Test secret {wanted[0]!r} but no Test secrets are configured "
+                    f"(`test_secrets.location` in weave.yaml)"
+                )
+            try:
+                product_secrets = store.for_product(run.request.product)
+            except SecretsError as e:
+                raise EnvironmentBringUpError(f"Repo {repo!r} names Test secret {wanted[0]!r}: {e}") from e
+            if lacking := product_secrets.missing(wanted):
+                raise EnvironmentBringUpError(
+                    f"Repo {repo!r} names Test secret {lacking[0]!r} that Product {run.request.product!r} "
+                    f"does not have: add it to {product_secrets.path}"
+                )
+            have.update(product_secrets.select(wanted))
+            self._note(run.record, f"Test secrets given to Repo {repo!r}'s services: {', '.join(wanted)} (names only; values are never recorded)")
+        picked = {n: have[n] for n in recipe.secrets}
+        if picked:
+            rec = run.record
+            rec.test_secrets_given = {**(rec.test_secrets_given or {}), repo: sorted(picked)}
+            self._save(rec)
+        return picked
 
     def _dependency_base_ref(self, product: ProductConfig, name: str, base_branch: str) -> str:
         """Where to read the Base branch of a Repo the run does not touch: the Code host's, just
@@ -536,7 +626,14 @@ class AgentWorker:
 
     def _note(self, rec: RunRecord, line: str) -> None:
         with open(self._run_dir(rec.run_id) / "run.log", "a") as f:
-            f.write(f"{_now()} {line}\n")
+            f.write(f"{_now()} {self._scrub(rec, line)}\n")
+
+    def _scrub(self, rec: RunRecord, text: str) -> str:
+        """`text` without any Test secret value given to this run: the last guard before it is written."""
+        with self._lock:
+            run = self._runs.get(rec.run_id)
+        given = run.test_secrets if run is not None else {}
+        return redact(text, [v for values in given.values() for v in values.values()])
 
 
 def _missing_on_branch(source: str, ref: str, path: str) -> bool:
@@ -548,6 +645,23 @@ def _missing_on_branch(source: str, ref: str, path: str) -> bool:
     if not git.has_commit(source, ref):
         return False
     return subprocess.run(["git", "-C", source, "cat-file", "-e", f"{ref}:{path}"], capture_output=True).returncode != 0
+
+
+def _recipe_secret_names(repo: str, source: str, ref: str) -> tuple[str, ...]:
+    """The Test secrets a Repo's Run recipe names on its Base branch (read at `ref`), by name.
+
+    A Repo with no recipe, or a recipe that cannot be read or parsed, names none here: the run
+    itself reports an unusable recipe.
+    """
+    if not _has_recipe(source, ref):
+        return ()
+    shown = subprocess.run(["git", "-C", source, "show", f"{ref}:{RECIPE_PATH}"], capture_output=True, text=True)
+    if shown.returncode != 0:
+        return ()
+    try:
+        return parse_recipe(repo, shown.stdout).secrets
+    except RecipeError:
+        return ()
 
 
 def _has_recipe(source: str, ref: str) -> bool:

@@ -160,6 +160,9 @@ class RunRecord:
     # Several Repos (#50): every Repo in the Environment and what it ran from ({"repo", "source":
     # "working copy" | "Task branch" | "Base branch", "branch", "touched"}), dependencies first.
     environment_repos: list[dict] | None = None
+    # The Test secrets given to the run (#52): the names each Repo's recipe asked for,
+    # {"<repo>": [names]}. Never a value. None: no recipe named any.
+    test_secrets_given: dict[str, list[str]] | None = None
 
     def status(self) -> RunStatus:
         return RunStatus(self.run_id, self.state, self.outcome, self.reason, self.tickets_done)

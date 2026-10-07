@@ -229,7 +229,7 @@ x-weave:
 
 `command` is a string (run with `sh -c`) or a list (run as is). A recipe may have no services. It
 may also name the Repos it needs: `x-weave: {depends_on: [svc]}`. The other `x-weave` fields of
-Spec 2 (seed, secrets, databases, MCP servers) are not read yet.
+Spec 2 (seed, databases, MCP servers) are not read yet; `secrets` is (next section).
 
 Between staging the agent's files and starting the agent, the worker brings each such Repo's
 recipe up inside the sandbox as its own Compose project (`-p <repo>`), on a shared network
@@ -255,6 +255,35 @@ The run record lists `environment_repos` (each Repo in the Environment, with `so
 copy, Task branch or Base branch, its `branch`, and whether the run `touched` it),
 `environment_services` (Repo, service, address, `ready_at`, `seconds_to_ready`) and `environment_logs` (each service's log, saved to
 `<runs_dir>/<run id>/environment/<repo>/<service>.log` before the sandbox is removed).
+
+#### Test secrets
+
+A Product's Test secrets (credentials for test accounts and sandboxes of outside services, never
+staging or production) are one file per Product on the Sandbox host, outside every repo:
+`<test_secrets.location>/<product>.yaml`, a flat `NAME: value` mapping (format:
+`config/test-secrets.example.yaml`). `test_secrets.location` in `weave.yaml` (default
+`~/.config/weave/secrets`) sits next to `subscription_store.location`, and the worker is given the
+folder as `WorkerSettings.test_secrets` (`load_configured_secret_store("weave.yaml")`). A human writes
+the file; runs only read it; it never changes per ticket. It must be readable by its owner only
+(`chmod 600`): a file others can read is refused. A Product's lookup opens only its own file.
+
+A recipe names the secrets it needs by name only: `x-weave: {secrets: [KORONA_API_KEY]}`. Each named
+secret reaches every service of that recipe as an environment variable of that name (Compose is told
+the names in the generated override and takes the values from the environment of the `up` command, so
+no file in the sandbox holds a value; the values go on both the `up --no-start` and the final `up -d`
+commands of the Repo's bring-up, and on nothing else). Nothing else from the file reaches any service, and no secret
+reaches the agent's sandbox environment. A throwaway database's own credentials live in the recipe,
+not here.
+
+A Repo the run does not touch but a recipe depends on gets its secrets the same way, read when its
+recipe is loaded (it ends the run as `needs-setup` if the Product lacks one).
+
+A named secret the Product lacks (or no file, or a file with the wrong mode) makes `start` return
+`NeedsSetup` naming the Repo and the secret, before any lease or sandbox. The file is read again when
+the run begins, and a secret that has gone since then ends the run as `needs-setup` before its
+sandbox starts. The run record lists the names given per Repo (`test_secrets_given`) and `run.log`
+says so; a value is never written to the record, `run.log`, the saved service logs or the event log
+(values echoed by a failing service are replaced with `[redacted Test secret]`).
 
 ### Images
 
