@@ -29,6 +29,24 @@ RUN python3 -m venv /opt/oh \
       openhands-agent-server==${OPENHANDS_VERSION} \
       openhands-tools==${OPENHANDS_VERSION}
 
+# Environment MCP servers (#55): the catalog's pinned database servers, each in its own virtualenv
+# under /opt/weave-mcp/<kind>, installed now so a run needs no network to start one. These pins are
+# the ones in src/workflow_weave/agent_worker/mcp.py (tests/test_environment_mcp_on_sysbox.py compares
+# them). Their other dependencies are resolved at build time, not pinned, except the MCP SDK under
+# postgres-mcp: it asks for `mcp>=1.5`, which now resolves to mcp 2.x, whose rename of FastMCP breaks
+# postgres-mcp 0.3.0 at import (found by starting it; see README "Images").
+ARG POSTGRES_MCP_VERSION=0.3.0
+ARG POSTGRES_MCP_SDK_VERSION=1.30.0
+ARG NEO4J_MCP_VERSION=0.6.0
+ARG MYSQL_MCP_VERSION=0.4.4
+RUN python3 -m venv /opt/weave-mcp/postgres \
+ && /opt/weave-mcp/postgres/bin/pip install --no-cache-dir -q \
+      postgres-mcp==${POSTGRES_MCP_VERSION} "mcp[cli]==${POSTGRES_MCP_SDK_VERSION}" \
+ && python3 -m venv /opt/weave-mcp/neo4j \
+ && /opt/weave-mcp/neo4j/bin/pip install --no-cache-dir -q mcp-neo4j-cypher==${NEO4J_MCP_VERSION} \
+ && python3 -m venv /opt/weave-mcp/mysql \
+ && /opt/weave-mcp/mysql/bin/pip install --no-cache-dir -q mysql-mcp-server==${MYSQL_MCP_VERSION}
+
 # IS_SANDBOX tells agent CLIs (Claude Code) they may skip permission prompts.
 # LITELLM_LOCAL_MODEL_COST_MAP: the agent-server otherwise fetches LiteLLM's cost map at
 # start-up, and a race in its retry thread sometimes kills the server before it is healthy.

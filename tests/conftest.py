@@ -191,10 +191,14 @@ def repo_with_recipe(
     )
 
 
-def product_yaml_for(repos: dict[str, Path], product: str = "probe-product") -> str:
-    """Product config text for `make_worker(product_yaml=...)` with these Repos (name -> clone)."""
+def product_yaml_for(
+    repos: dict[str, Path], product: str = "probe-product", database_mcp_kinds: tuple[str, ...] = ()
+) -> str:
+    """Product config text for `make_worker(product_yaml=...)` with these Repos (name -> clone), and
+    the database kinds the Product enables Environment MCP servers for."""
     lines = "".join(f"  {name}:\n    source: {path}\n" for name, path in repos.items())
-    return f"product: {product}\nrepos:\n{lines}"
+    kinds = f"database_mcp_kinds: [{', '.join(database_mcp_kinds)}]\n" if database_mcp_kinds else ""
+    return f"product: {product}\n{kinds}repos:\n{lines}"
 
 
 @pytest.fixture

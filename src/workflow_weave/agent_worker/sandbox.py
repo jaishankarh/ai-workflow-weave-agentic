@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 from urllib.request import urlopen
 
 from openhands.sdk.workspace import RemoteWorkspace
@@ -352,6 +352,39 @@ settings.setdefault("skillOverrides", {}).update({name: "off" for name in sys.ar
 os.makedirs(os.path.dirname(path), exist_ok=True)
 json.dump(settings, open(path, "w"), indent=2)
 """
+
+
+# Adds MCP servers to the agent's user-level configuration (Claude Code's `~/.claude.json`, top-level
+# `mcpServers`, "user" scope): everything else in the file, and servers staged earlier, stay. The file
+# holds the databases' credentials, so only its owner can read it.
+_MERGE_MCP_SERVERS = """import json, os, sys
+path = os.path.expanduser("~/.claude.json")
+config = json.load(open(path)) if os.path.exists(path) else {}
+config.setdefault("mcpServers", {}).update(json.load(open(sys.argv[1])))
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(config, f, indent=2)
+os.chmod(path, 0o600)
+"""
+
+
+def stage_mcp_servers(sandbox: Sandbox, servers: Mapping[str, dict]) -> None:
+    """Make `servers` (name -> Claude Code `mcpServers` entry) the agent's, at user level; never a
+    working copy's `.mcp.json`. May be called again to add more (the External MCP servers, #56): a
+    server of the same name is replaced, any other stays. Nothing to stage writes nothing."""
+    if not servers:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        script, entries = Path(tmp) / "merge_mcp_servers.py", Path(tmp) / "mcp-servers.json"
+        script.write_text(_MERGE_MCP_SERVERS)
+        entries.write_text(json.dumps(dict(servers)))
+        sandbox.workspace.file_upload(script, "/tmp/weave-staging/merge_mcp_servers.py")
+        sandbox.workspace.file_upload(entries, "/tmp/weave-staging/mcp-servers.json")
+    sandbox.sh(
+        "python3 /tmp/weave-staging/merge_mcp_servers.py /tmp/weave-staging/mcp-servers.json; status=$?; "
+        "rm -f /tmp/weave-staging/merge_mcp_servers.py /tmp/weave-staging/mcp-servers.json; exit $status",
+        cwd="/",
+    )
 
 
 def turn_off_skills(sandbox: Sandbox, names: list[str]) -> None:

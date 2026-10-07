@@ -27,7 +27,10 @@ from .environment import (
     FROM_BASE_BRANCH, FROM_TASK_BRANCH, RECIPE_PATH, Environment, EnvironmentBringUpError, LogsNotSaved, Placement,
     Recipe, RecipeError, parse_recipe, resolve_environment, seed_in_dependency_order,
 )
-from .sandbox import WORKDIR, Sandbox, SandboxError, require_runtime, stage_skills, stage_user_files
+from .mcp import McpPlanError, plan_environment_servers
+from .sandbox import (
+    WORKDIR, Sandbox, SandboxError, require_runtime, stage_mcp_servers, stage_skills, stage_user_files,
+)
 from . import standards
 from .secret_store import SecretsError, redact
 from .subscriptions import Lease
@@ -358,6 +361,8 @@ class AgentWorker:
             # Subscription use); a failure here ends the run with its reason.
             if with_recipe:
                 self._bring_up_environment(run, product, sandbox, refs, environments)
+                # Wired before the agent starts, once the databases are up and seeded.
+                self._start_environment_mcp_servers(run, product, sandbox, environments)
 
             agent = ACPAgent(acp_command=profile.acp_command, acp_session_mode=profile.acp_session_mode)
             log = _EventLog(rec.event_log)
@@ -498,6 +503,32 @@ class AgentWorker:
             if seeded:
                 rec.environment_seeds = seeded
                 self._save(rec)
+
+    def _start_environment_mcp_servers(
+        self, run: _Run, product: ProductConfig, sandbox: Sandbox, environments: list[Environment]
+    ) -> None:
+        """Give the agent an Environment MCP server for each database the recipes name whose kind the
+        Product enables (#55), wired to that database in this run's own Environment. Called once every
+        Repo is up and seeded, before the agent starts. The record lists what was started and what
+        was omitted with the reason, and run.log has a line for each."""
+        rec = run.record
+        try:
+            plan = plan_environment_servers(
+                [(e.repo, e.recipe.databases) for e in environments if e.recipe is not None],
+                product.database_mcp_kinds,
+            )
+        except McpPlanError as e:
+            raise EnvironmentBringUpError(str(e)) from e
+        if not plan.started and not plan.omitted:
+            return
+        stage_mcp_servers(sandbox, plan.entries())
+        rec.environment_mcp_servers = [s.as_record() for s in plan.started]
+        rec.environment_mcp_omitted = [o.as_record() for o in plan.omitted]
+        self._save(rec)
+        for s in plan.started:
+            self._note(rec, f"Environment MCP server {s.name} started for {s.address} ({s.kind}, {s.package}, read-write)")
+        for o in plan.omitted:
+            self._note(rec, f"no Environment MCP server for Repo {o.repo!r} service {o.service!r}: {o.reason}")
 
     def _secrets_for_recipe(self, run: _Run, repo: str, recipe: Recipe) -> dict[str, str]:
         """The Test secrets `recipe` (as it runs: a working copy, Task branch or a dependency's Base
