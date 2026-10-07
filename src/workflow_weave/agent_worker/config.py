@@ -27,6 +27,9 @@ class RepoConfig:
     Repo's own `rules_files`) or `repo` (the Repo's own `rules_files` alone).
     A rules file is a path in the Repo, a file or a folder of files, always
     read as it stands on the Repo's Base branch.
+
+    `base_branch` is the Repo's Base branch (default `main`), for whoever builds a
+    run request; a request still names the Base branch it uses for each Repo.
     """
 
     name: str
@@ -34,6 +37,7 @@ class RepoConfig:
     skill_overrides: frozenset[str] = frozenset()
     coding_standards: str = "central"
     rules_files: tuple[str, ...] = ()
+    base_branch: str = "main"
 
     @property
     def uses_product_standards(self) -> bool:
@@ -74,6 +78,7 @@ def load_product_config(path: str | Path, protected_skills: frozenset[str] = PRO
         skill_overrides: [tdd]     # optional; never a protected skill
         coding_standards: central+repo   # central (default) | central+repo | repo
         rules_files: [CLAUDE.md, .claude/rules]   # required unless central
+        base_branch: main          # optional; default main
     ```
     """
     data = yaml.safe_load(Path(path).read_text()) or {}
@@ -105,12 +110,16 @@ def load_product_config(path: str | Path, protected_skills: frozenset[str] = PRO
             raise ProductConfigError(
                 f"{path}: repo {repo_name!r}: coding_standards {mode!r} needs 'rules_files' naming the Repo's rules files"
             )
+        base = repo.get("base_branch", "main")
+        if not isinstance(base, str) or not base.strip():
+            raise ProductConfigError(f"{path}: repo {repo_name!r}: 'base_branch' must be a branch name")
         repos[repo_name] = RepoConfig(
             name=repo_name,
             source=str(repo["source"]),
             skill_overrides=frozenset(overrides),
             coding_standards=mode,
             rules_files=tuple(r.strip("/") for r in rules),
+            base_branch=base,
         )
     return ProductConfig(name=name, repos=repos)
 

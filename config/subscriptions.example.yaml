@@ -16,3 +16,5 @@ products:
   # which Product may lease which Subscription.
   ahdismoi:
     claude-code: [claude-main, claude-spare]
+  sri-aurobindo-works-chat:        # the pilot Product (#44)
+    claude-code: [claude-main, claude-spare]

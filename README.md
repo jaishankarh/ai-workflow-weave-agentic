@@ -90,6 +90,12 @@ Nothing goes into a working copy, so the Repo's own `CLAUDE.md` loads as committ
 The record keeps `always_on_file` and, per Repo, where each standard was read
 from (`coding_standards`). See `agent_worker/standards.py`.
 
+The pilot Product is `config/products/sri-aurobindo-works-chat.yaml`: the chat
+repo on `central+repo` (its `CLAUDE.md` and `.claude/rules`), Ahdismoi on
+`central`, both on Base branch `main`; its standards are
+`skills/products/sri-aurobindo-works-chat/coding-standards.md`. Set each Repo's
+`source` to its clone on your Sandbox host.
+
 **A central skill wins over a Repo's own skill of the same name.** Claude Code
 documents "personal over project": `~/.claude/skills/<name>` beats the project's
 `.claude/skills/<name>`. But a sandbox session starts in `/workspace`, with each
