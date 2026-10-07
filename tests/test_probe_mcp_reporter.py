@@ -1,7 +1,7 @@
 """The probe's MCP report (used by test_environment_mcp_on_sysbox.py), checked here against a tiny
 stdio MCP server so the probe's client path is exercised without Docker.
 
-The probe acts as Claude Code does for user-level servers: it reads `~/.claude.json` `mcpServers`,
+The probe acts as Claude Code does: it reads the managed MCP configuration's `mcpServers`,
 starts each server with exactly the command, arguments and environment configured there, and calls
 the tools the script names.
 """
@@ -40,7 +40,7 @@ def probe():
 
 
 def configure(home: Path, tmp_path: Path, servers: dict) -> None:
-    (home / ".claude.json").write_text(json.dumps({"mcpServers": servers}))
+    (home / "managed-mcp.json").write_text(json.dumps({"mcpServers": servers}))
 
 
 @pytest.fixture
@@ -48,6 +48,7 @@ def home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("WEAVE_MANAGED_MCP", str(home / "managed-mcp.json"))
     return home
 
 

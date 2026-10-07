@@ -493,8 +493,10 @@ def report_weave_env(ctx: dict[str, Any]) -> Any:
     return results or None
 
 def _user_mcp_servers() -> dict[str, Any]:
-    """The MCP servers in the agent's user-level configuration (`~/.claude.json`, `mcpServers`)."""
-    path = Path.home() / ".claude.json"
+    """The MCP servers Claude Code would load: the managed configuration's (`mcpServers` in
+    /etc/claude-code/managed-mcp.json), which since #56 holds the only ones it loads. The location
+    can be overridden with WEAVE_MANAGED_MCP, for testing the probe outside a sandbox."""
+    path = Path(os.environ.get("WEAVE_MANAGED_MCP") or "/etc/claude-code/managed-mcp.json")
     if not path.is_file():
         return {}
     return json.loads(path.read_text()).get("mcpServers") or {}

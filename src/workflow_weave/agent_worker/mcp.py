@@ -23,6 +23,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping
 
+from .push_gateway import GATEWAY_HOST
+
 MCP_ROOT = "/opt/weave-mcp"
 
 
@@ -137,6 +139,28 @@ def default_port(kind: str) -> int:
 
 
 @dataclass(frozen=True)
+class ExternalMcpDecl:
+    """One External MCP server a Run recipe declares (`x-weave.external_mcp`, #56).
+
+    Exactly one of `command` (a stdio server, started inside the run's sandbox: each run has its own
+    copy) or `url` (a remote server). `secrets` are the names of the Test secrets it uses, and the
+    only credentials it is given: a stdio server gets each as an environment variable of that name; a
+    remote one gets them where its `headers` say `${NAME}`.
+    """
+
+    name: str
+    command: str | None = None
+    args: tuple[str, ...] = ()
+    url: str | None = None
+    headers: tuple[tuple[str, str], ...] = ()
+    secrets: tuple[str, ...] = ()
+
+    @property
+    def transport(self) -> str:
+        return "stdio" if self.command else "http"
+
+
+@dataclass(frozen=True)
 class DatabaseSpec:
     """One database a Run recipe names (`x-weave.databases`)."""
 
@@ -193,6 +217,131 @@ class McpPlan:
     def entries(self) -> dict[str, dict]:
         """The servers as Claude Code's `mcpServers` entries, by name."""
         return {s.name: s.settings.as_claude_entry() for s in self.started}
+
+
+@dataclass(frozen=True)
+class ExternalMcpServer:
+    """One External MCP server to start for the run (#56)."""
+
+    name: str  # as the agent sees it: `<repo>-<declared name>`
+    repo: str
+    declared: str  # the name the recipe gave it
+    transport: str  # "stdio" or "http"
+    secrets: tuple[str, ...]  # the Test secrets it was given, by name
+    entry: dict  # Claude Code's `mcpServers` entry; holds the secrets' values, so never recorded
+
+    def as_record(self) -> dict:
+        """What the run record says: names only. Not the command, the url or any value."""
+        return {
+            "name": self.name, "repo": self.repo, "declared": self.declared, "transport": self.transport,
+            "secrets": list(self.secrets),
+        }
+
+
+@dataclass
+class ExternalMcpPlan:
+    started: list[ExternalMcpServer] = field(default_factory=list)
+
+    def entries(self) -> dict[str, dict]:
+        return {s.name: s.entry for s in self.started}
+
+
+# A stdio server is started through `env -i`, so that it sees exactly PATH, HOME and the Test secrets
+# its recipe names. Claude Code starts a server in its own environment plus the entry's `env`, and
+# the sandbox's environment carries the Subscription's credential: the server must not inherit it.
+_ISOLATE = 'exec env -i PATH="$PATH" HOME="$HOME"{names} "$@"'
+_ISOLATE_NAME = " {n}=\"${n}\""
+
+
+def _stdio_entry(decl: ExternalMcpDecl, secrets: Mapping[str, str]) -> dict:
+    script = _ISOLATE.format(names="".join(_ISOLATE_NAME.format(n=n) for n in decl.secrets))
+    entry: dict = {
+        "type": "stdio", "command": "/bin/sh",
+        "args": ["-c", script, "weave-external-mcp", decl.command, *decl.args],
+    }
+    if decl.secrets:
+        entry["env"] = {n: secrets[n] for n in decl.secrets}
+    return entry
+
+
+def _http_entry(decl: ExternalMcpDecl, secrets: Mapping[str, str]) -> dict:
+    expand = re.compile(r"\$\{([^}]*)\}")
+    entry: dict = {"type": "http", "url": decl.url}
+    if decl.headers:
+        entry["headers"] = {k: expand.sub(lambda m: secrets[m.group(1)], v) for k, v in decl.headers}
+    return entry
+
+
+def plan_external_servers(
+    repos: Iterable[tuple[str, Iterable[ExternalMcpDecl]]],
+    secrets: Mapping[str, Mapping[str, str]],
+    taken: Iterable[str] = (),
+) -> ExternalMcpPlan:
+    """The External MCP servers to start: `repos` is (Repo name, the servers its recipe declares) in the
+    order the Repos come up; `secrets` is each Repo's Test secrets by name (those the run was given);
+    `taken` are the names of servers already there (the Environment MCP servers).
+
+    A server is given only the secrets its declaration names. A name taken, or a secret missing,
+    is a McpPlanError that names it (never a value).
+    """
+    plan = ExternalMcpPlan()
+    named: dict[str, str] = {name: "an Environment MCP server" for name in taken}
+    for repo, decls in repos:
+        for decl in decls:
+            name = server_name(repo, decl.name)
+            if name in named:
+                raise McpPlanError(
+                    f"Repo {repo!r}'s external server {decl.name!r} would be the MCP server {name!r}, "
+                    f"which is already {named[name]}: rename it"
+                )
+            named[name] = f"Repo {repo!r}'s external server {decl.name!r}"
+            have = secrets.get(repo, {})
+            if lacking := [n for n in decl.secrets if n not in have]:
+                raise McpPlanError(f"MCP server {name!r} names Test secret {lacking[0]!r}, which this run was not given")
+            given = {n: have[n] for n in decl.secrets}
+            if bad := next((n for n, v in given.items() if "${" in v), None):
+                raise McpPlanError(
+                    f"MCP server {name!r}: the value of Test secret {bad!r} contains `${{`, which Claude Code "
+                    f"would expand before the server saw it"
+                )
+            entry = _stdio_entry(decl, given) if decl.command else _http_entry(decl, given)
+            plan.started.append(ExternalMcpServer(name, repo, decl.name, decl.transport, decl.secrets, entry))
+    return plan
+
+
+def _strings(value: object):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _strings(k)
+            yield from _strings(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _strings(v)
+
+
+MIN_FORGE_TOKEN_LENGTH = 6  # shorter "tokens" would match ordinary text
+
+
+def refuse_forge_credentials(plan: ExternalMcpPlan, forge_values: Iterable[str]) -> None:
+    """Raise McpPlanError if any server's configuration holds a Tracker or Code host credential
+    (ADR 0009): one of `forge_values` (the push gateway's run token, any Code host token the worker or
+    the Subscription had) or the push gateway's address. The last check before the configuration is
+    written; the message names the server, never a value."""
+    values = [v for v in forge_values if v and len(v) >= MIN_FORGE_TOKEN_LENGTH]
+    for server in plan.started:
+        for text in _strings(server.entry):
+            if GATEWAY_HOST in text:
+                raise McpPlanError(
+                    f"MCP server {server.name!r} would reach the push gateway ({GATEWAY_HOST}): "
+                    f"no External MCP server may reach the Tracker or Code host (ADR 0009)"
+                )
+            if any(v in text for v in values):
+                raise McpPlanError(
+                    f"MCP server {server.name!r} would hold a Tracker or Code host credential: "
+                    f"no External MCP server may be given one (ADR 0009)"
+                )
 
 
 _NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]")

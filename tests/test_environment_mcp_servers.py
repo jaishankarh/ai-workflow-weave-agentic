@@ -244,11 +244,15 @@ class LocalSandbox:
     def __init__(self, root):
         self.root, self.home = root, root / "home"
         self.home.mkdir()
+        # Where Claude Code reads the only MCP servers it loads (managed-mcp.json, #56).
+        self.managed = root / "etc" / "claude-code" / "managed-mcp.json"
         self.commands = []
         self.workspace = self
 
     def _local(self, text):
-        return text.replace("/tmp/weave-staging", str(self.root / "staging"))
+        return text.replace("/tmp/weave-staging", str(self.root / "staging")).replace(
+            "/etc/claude-code", str(self.root / "etc" / "claude-code")
+        )
 
     def file_upload(self, source, destination):
         target = Path(self._local(str(destination)))
@@ -268,35 +272,36 @@ SERVERS = {"svc-db": {"type": "stdio", "command": "/opt/weave-mcp/postgres/bin/p
                       "env": {"DATABASE_URI": "postgresql://app:pw@db.svc:5432/chat"}}}
 
 
-def test_servers_are_staged_in_the_agents_user_level_configuration_and_nowhere_in_a_working_copy(tmp_path):
+def test_servers_are_staged_in_claude_codes_managed_mcp_configuration_and_nowhere_in_a_working_copy(tmp_path):
+    # #56 moved this from `~/.claude.json`: managed-mcp.json is the one place whose servers are the
+    # only ones Claude Code loads (a Repo's own `.mcp.json` and user-level servers are not).
     sandbox = LocalSandbox(tmp_path)
     stage_mcp_servers(sandbox, SERVERS)
-    config = json.loads((sandbox.home / ".claude.json").read_text())
-    assert config["mcpServers"] == SERVERS
+    config = json.loads(sandbox.managed.read_text())
+    assert config == {"mcpServers": SERVERS}
     assert not (tmp_path / "staging" / "mcp-servers.json").exists(), "the staged copy of the credentials was left behind"
-    assert (sandbox.home / ".claude.json").stat().st_mode & 0o077 == 0, "the configuration holds credentials"
-    assert list(tmp_path.rglob(".mcp.json")) == []
+    assert sandbox.managed.stat().st_mode & 0o077 == 0, "the configuration holds credentials"
+    assert list(tmp_path.rglob(".mcp.json")) == [] and not (sandbox.home / ".claude.json").exists()
 
 
-def test_staging_keeps_what_the_user_level_configuration_already_holds_and_servers_staged_before(tmp_path):
+def test_staging_keeps_servers_staged_before_and_replaces_one_of_the_same_name(tmp_path):
     sandbox = LocalSandbox(tmp_path)
-    (sandbox.home / ".claude.json").write_text(json.dumps({
-        "theme": "dark", "mcpServers": {"earlier": {"type": "http", "url": "https://example.test/mcp"}},
-    }))
     stage_mcp_servers(sandbox, SERVERS)
     # A second call (External MCP servers, #56) adds to the first and replaces a server of the same name.
     stage_mcp_servers(sandbox, {"ext-pay": {"type": "stdio", "command": "pay-mcp"},
                                 "svc-db": {"type": "stdio", "command": "replaced"}})
-    config = json.loads((sandbox.home / ".claude.json").read_text())
-    assert config["theme"] == "dark"
-    assert set(config["mcpServers"]) == {"earlier", "svc-db", "ext-pay"}
+    config = json.loads(sandbox.managed.read_text())
+    assert set(config["mcpServers"]) == {"svc-db", "ext-pay"}
     assert config["mcpServers"]["svc-db"]["command"] == "replaced"
 
 
-def test_staging_no_servers_writes_nothing(tmp_path):
+def test_staging_no_servers_still_writes_the_configuration_so_that_no_other_server_loads(tmp_path):
     sandbox = LocalSandbox(tmp_path)
     stage_mcp_servers(sandbox, {})
-    assert sandbox.commands == [] and not (sandbox.home / ".claude.json").exists()
+    assert json.loads(sandbox.managed.read_text()) == {"mcpServers": {}}
+    stage_mcp_servers(sandbox, SERVERS)
+    stage_mcp_servers(sandbox, {})
+    assert json.loads(sandbox.managed.read_text()) == {"mcpServers": SERVERS}
 
 
 def test_the_pins_in_the_catalog_are_the_ones_the_sandbox_image_installs_each_in_its_own_virtualenv():
@@ -344,7 +349,7 @@ def test_the_servers_are_wired_into_the_agents_configuration_and_the_run_record_
     record, log, sandbox, worker = wired(
         tmp_path, [EnvironmentStub("svc", [PG, NEO, REDIS])], {"postgres"},
     )
-    config = json.loads((sandbox.home / ".claude.json").read_text())
+    config = json.loads(sandbox.managed.read_text())
     assert list(config["mcpServers"]) == ["svc-db"]
     assert record.environment_mcp_servers == [
         {"name": "svc-db", "repo": "svc", "service": "db", "kind": "postgres", "address": "db.svc",
@@ -370,7 +375,7 @@ def test_a_run_whose_recipes_name_no_database_has_no_servers_and_a_record_that_s
     (tmp_path / "sandbox").mkdir()
     record, log, sandbox, _ = wired(tmp_path, [EnvironmentStub("svc", None)], {"postgres", "neo4j", "mysql"})
     assert record.environment_mcp_servers is None and record.environment_mcp_omitted is None
-    assert not (sandbox.home / ".claude.json").exists()
+    assert not sandbox.managed.exists()  # (the run's start stages the empty set, see test_external_mcp_servers.py)
 
 
 def test_servers_of_every_repo_in_the_environment_are_wired_dependencies_first(tmp_path):
@@ -379,7 +384,7 @@ def test_servers_of_every_repo_in_the_environment_are_wired_dependencies_first(t
         tmp_path, [EnvironmentStub("svc", [PG]), EnvironmentStub("client", [PG])], {"postgres"},
     )
     assert [s["name"] for s in record.environment_mcp_servers] == ["svc-db", "client-db"]
-    assert list(json.loads((sandbox.home / ".claude.json").read_text())["mcpServers"]) == ["svc-db", "client-db"]
+    assert list(json.loads(sandbox.managed.read_text())["mcpServers"]) == ["svc-db", "client-db"]
 
 
 def test_two_servers_that_would_share_a_name_end_the_run_as_needs_setup_before_any_agent_starts(tmp_path):

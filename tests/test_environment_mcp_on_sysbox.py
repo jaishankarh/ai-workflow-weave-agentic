@@ -4,7 +4,7 @@ Each test is named after an acceptance criterion of #55. Every run here is a rea
 sysbox runtime that pulls public images (postgres:16-alpine, neo4j:5, redis:7-alpine, alpine) from
 the internet inside it, so these tests SKIP on a host that does not list `sysbox-runc` in `docker info`
 (the first test needs only a Docker daemon). The probe stands in for the agent: it reads the agent's
-user-level `~/.claude.json`, starts each MCP server as Claude Code would, and calls its tools (the
+managed MCP configuration (`/etc/claude-code/managed-mcp.json`), starts each MCP server as Claude Code would, and calls its tools (the
 probe's `mcp` report). The same logic without Docker is in test_environment_mcp_servers.py.
 
 NOT YET RUN: the workspace these were written in has no Docker daemon, let alone sysbox.
@@ -113,10 +113,10 @@ def test_the_pinned_servers_run_in_the_sandbox_image_each_in_its_own_virtualenv(
         assert out.stdout.strip() == CATALOG[kind].version
 
 
-def test_claude_code_lists_a_server_staged_in_the_user_level_configuration_as_connected(claude_code_image):
-    """Claude Code itself (not the probe) reads `~/.claude.json` `mcpServers` and starts the pinned server."""
+def test_claude_code_lists_a_server_staged_in_the_managed_configuration_as_connected(claude_code_image):
+    """Claude Code itself (not the probe) reads managed-mcp.json `mcpServers` and starts the pinned server."""
     script = (
-        'cat > ~/.claude.json <<EOF\n'
+        'mkdir -p /etc/claude-code && cat > /etc/claude-code/managed-mcp.json <<EOF\n'
         '{"mcpServers": {"svc-graph": {"type": "stdio", "command": "/opt/weave-mcp/neo4j/bin/mcp-neo4j-cypher", '
         '"args": [], "env": {"NEO4J_URI": "bolt://graph.svc:7687", "NEO4J_USERNAME": "neo4j", '
         '"NEO4J_PASSWORD": "x", "NEO4J_DATABASE": "neo4j"}}}}\nEOF\n'

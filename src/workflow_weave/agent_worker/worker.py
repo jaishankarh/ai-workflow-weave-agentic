@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import shlex
 import subprocess
@@ -10,7 +11,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Sequence, TypeVar
 
 from openhands.sdk import Conversation
 from openhands.sdk.agent import ACPAgent
@@ -27,7 +28,7 @@ from .environment import (
     FROM_BASE_BRANCH, FROM_TASK_BRANCH, RECIPE_PATH, Environment, EnvironmentBringUpError, LogsNotSaved, Placement,
     Recipe, RecipeError, environment_manifest, parse_recipe, resolve_environment, seed_in_dependency_order,
 )
-from .mcp import McpPlanError, plan_environment_servers
+from .mcp import McpPlanError, plan_environment_servers, plan_external_servers, refuse_forge_credentials
 from .sandbox import (
     WORKDIR, Sandbox, SandboxError, require_runtime, stage_mcp_servers, stage_skills, stage_user_files,
     stage_weave_env,
@@ -37,7 +38,7 @@ from . import standards
 from .secret_store import SecretsError, redact
 from .subscriptions import Lease
 from . import local_tickets
-from .push_gateway import GATEWAY_HOST, PushGateway, RunRemotes, without_code_host_tokens
+from .push_gateway import CODE_HOST_TOKEN_VARS, GATEWAY_HOST, PushGateway, RunRemotes, without_code_host_tokens
 from .staging import StagingError, StagingPlan, central_skills_version, read_repo_skills
 from .staging import plan as plan_skills
 from workflow_weave.central_skills import CentralSkills
@@ -174,6 +175,7 @@ class AgentWorker:
         named = {
             t.name: names
             for t in request.repos
+            # Services' and External MCP servers' alike: a missing one stops the run before it starts.
             if (names := _recipe_secret_names(t.name, product.repos[t.name].source, refs[t.name]))
         }
         if not named:
@@ -289,8 +291,13 @@ class AgentWorker:
             problem, run.test_secrets = self._test_secrets(run.request, product, refs)
             if problem:
                 raise EnvironmentBringUpError(problem)
-            if run.test_secrets:
-                rec.test_secrets_given = {repo: sorted(given) for repo, given in run.test_secrets.items()}
+            # Those given to a Repo's services (an External MCP server's are recorded with the server).
+            for_services = {
+                repo: sorted(set(values) & set(_recipe_secret_names(repo, product.repos[repo].source, refs[repo], True)))
+                for repo, values in run.test_secrets.items()
+            }
+            if any(for_services.values()):
+                rec.test_secrets_given = {repo: given for repo, given in for_services.items() if given}
                 self._save(rec)
                 for repo, given in rec.test_secrets_given.items():
                     self._note(rec, f"Test secrets given to Repo {repo!r}'s services: {', '.join(given)} "
@@ -355,6 +362,8 @@ class AgentWorker:
             # The always-on file and the resolved Coding standards, at user level (ADR 0002).
             user_dir = stage_user_files(sandbox, lambda d: resolved.tarball(d, WORKDIR))
             stage_weave_env(sandbox)  # the agent's one command for its Environment (#54)
+            # Before the agent exists: the only MCP servers it can load are the ones staged below (#56).
+            self._ignore_repos_mcp_config(run, product, sandbox, refs)
             rec.always_on_file = f"{user_dir}/{standards.ALWAYS_ON_FILE}"
             rec.coding_standards = {r.repo: [f.origin for f in r.files] for r in resolved.repos}
             if run.cancel_requested.is_set():
@@ -365,7 +374,10 @@ class AgentWorker:
             if with_recipe:
                 self._bring_up_environment(run, product, sandbox, refs, environments)
                 # Wired before the agent starts, once the databases are up and seeded.
-                self._start_environment_mcp_servers(run, product, sandbox, environments)
+                taken = self._start_environment_mcp_servers(run, product, sandbox, environments)
+                self._start_external_mcp_servers(
+                    run, sandbox, environments, taken, self._forge_credentials(run, remotes)
+                )
 
             agent = ACPAgent(acp_command=profile.acp_command, acp_session_mode=profile.acp_session_mode)
             log = _EventLog(rec.event_log)
@@ -550,6 +562,11 @@ class AgentWorker:
     def _bring_up_placed(
         self, run: _Run, sandbox: Sandbox, placed: list[tuple[Placement, Recipe]], environments: list[Environment]
     ) -> None:
+        # An External MCP server's secret the Product lacks stops the run before any service starts
+        # (the servers themselves start once every Repo is up).
+        for placement, recipe in placed:
+            if recipe.external_mcp_secrets:
+                self._load_test_secrets(run, placement.repo, recipe.external_mcp_secrets, "External MCP servers")
         for placement, recipe in placed:
             given = self._secrets_for_recipe(run, placement.repo, recipe)
             environment = Environment(
@@ -576,9 +593,69 @@ class AgentWorker:
                 rec.environment_seeds = seeded
                 self._save(rec)
 
+    def _ignore_repos_mcp_config(
+        self, run: _Run, product: ProductConfig, sandbox: Sandbox, refs: dict[str, str]
+    ) -> None:
+        """Make the Environment and External MCP servers the only ones the agent can load (#56).
+
+        A Repo's own committed MCP config (`.mcp.json`) is not used: Claude Code loads it without
+        asking in a headless run, so it is not enough to leave it alone. Staging the managed MCP
+        configuration (empty here; the servers are added to it as they start) is what stops it: when
+        that file exists Claude Code loads only its servers. The run's log names each Repo that had one.
+        """
+        rec = run.record
+        stage_mcp_servers(sandbox, {})
+        found = [t.name for t in run.request.repos
+                 if git.has_commit(product.repos[t.name].source, refs[t.name])
+                 and not _missing_on_branch(product.repos[t.name].source, refs[t.name], ".mcp.json")]
+        for repo in found:
+            self._note(rec, f"Repo {repo!r} commits an MCP config (.mcp.json) that this run ignores: "
+                            f"only Environment MCP servers and External MCP servers are given to the agent")
+        if found:
+            rec.repo_mcp_config_ignored = found
+            self._save(rec)
+
+    def _forge_credentials(self, run: _Run, remotes: RunRemotes | None) -> list[str]:
+        """Every Tracker or Code host credential this run's machinery holds: the push gateway's run
+        token and any Code host token variable of the worker's or the Subscription's environment
+        (ADR 0009). None of them may appear in an External MCP server's configuration."""
+        values = [remotes.token] if remotes is not None else []
+        values += [v for k, v in run.lease.env.items() if k.upper() in CODE_HOST_TOKEN_VARS] if run.lease else []
+        values += [v for k, v in os.environ.items() if k.upper() in CODE_HOST_TOKEN_VARS]
+        return [v for v in values if v]
+
+    def _start_external_mcp_servers(
+        self, run: _Run, sandbox: Sandbox, environments: list[Environment], taken: Sequence[str],
+        forge_credentials: Sequence[str],
+    ) -> None:
+        """Give the agent the External MCP servers the recipes declare (#56), in this run's own
+        sandbox (a stdio server is a process its Claude Code starts there; no other run has it).
+
+        Each server gets only the Test secrets its declaration names, from the Product's own file; a
+        named secret the Product lacks stops the run as needs-setup. `taken` are the Environment MCP
+        servers' names. Before anything is staged the configuration is checked for a Tracker or Code
+        host credential (ADR 0009). The record lists the servers by name, run.log has a line each."""
+        rec = run.record
+        declared = [(e.repo, e.recipe.external_mcp) for e in environments if e.recipe is not None and e.recipe.external_mcp]
+        if not declared:
+            return
+        for repo, decls in declared:
+            self._load_test_secrets(run, repo, [n for d in decls for n in d.secrets], "External MCP servers")
+        try:
+            plan = plan_external_servers(declared, run.test_secrets, taken)
+            refuse_forge_credentials(plan, forge_credentials)
+        except McpPlanError as e:
+            raise EnvironmentBringUpError(self._scrub(rec, str(e))) from e
+        stage_mcp_servers(sandbox, plan.entries())
+        rec.external_mcp_servers = [s.as_record() for s in plan.started]
+        self._save(rec)
+        for s in plan.started:
+            given = ", ".join(s.secrets) or "none"
+            self._note(rec, f"External MCP server {s.name} started ({s.transport}; Test secrets: {given})")
+
     def _start_environment_mcp_servers(
         self, run: _Run, product: ProductConfig, sandbox: Sandbox, environments: list[Environment]
-    ) -> None:
+    ) -> list[str]:
         """Give the agent an Environment MCP server for each database the recipes name whose kind the
         Product enables (#55), wired to that database in this run's own Environment. Called once every
         Repo is up and seeded, before the agent starts. The record lists what was started and what
@@ -592,7 +669,7 @@ class AgentWorker:
         except McpPlanError as e:
             raise EnvironmentBringUpError(str(e)) from e
         if not plan.started and not plan.omitted:
-            return
+            return []
         stage_mcp_servers(sandbox, plan.entries())
         rec.environment_mcp_servers = [s.as_record() for s in plan.started]
         rec.environment_mcp_omitted = [o.as_record() for o in plan.omitted]
@@ -601,14 +678,28 @@ class AgentWorker:
             self._note(rec, f"Environment MCP server {s.name} started for {s.address} ({s.kind}, {s.package}, read-write)")
         for o in plan.omitted:
             self._note(rec, f"no Environment MCP server for Repo {o.repo!r} service {o.service!r}: {o.reason}")
+        return [s.name for s in plan.started]
 
     def _secrets_for_recipe(self, run: _Run, repo: str, recipe: Recipe) -> dict[str, str]:
         """The Test secrets `recipe` (as it runs: a working copy, Task branch or a dependency's Base
         branch) names, from the Product's own file. Names the start-time check already resolved are
         reused; others (a dependency Repo's, or one added on the branch) are read now and added to
         what this run scrubs from everything it records."""
+        have = self._load_test_secrets(run, repo, recipe.secrets, "services")
+        picked = {n: have[n] for n in recipe.secrets}
+        if picked:
+            rec = run.record
+            rec.test_secrets_given = {**(rec.test_secrets_given or {}), repo: sorted(picked)}
+            self._save(rec)
+        return picked
+
+    def _load_test_secrets(self, run: _Run, repo: str, names: Sequence[str], given_to: str) -> dict[str, str]:
+        """Read the named Test secrets of `repo`'s recipe (for its `given_to`: services or External MCP
+        servers) into what the run holds, from the Product's own file, unless already held. A name the
+        Product lacks, or no readable file, is needs-setup. Returns everything held for the Repo: pick
+        by name, so that a service is not given an MCP server's secret or the other way round."""
         have = run.test_secrets.setdefault(repo, {})
-        wanted = [n for n in recipe.secrets if n not in have]
+        wanted = [n for n in dict.fromkeys(names) if n not in have]
         if wanted:
             store = self.settings.test_secrets
             if store is None:
@@ -626,13 +717,8 @@ class AgentWorker:
                     f"does not have: add it to {product_secrets.path}"
                 )
             have.update(product_secrets.select(wanted))
-            self._note(run.record, f"Test secrets given to Repo {repo!r}'s services: {', '.join(wanted)} (names only; values are never recorded)")
-        picked = {n: have[n] for n in recipe.secrets}
-        if picked:
-            rec = run.record
-            rec.test_secrets_given = {**(rec.test_secrets_given or {}), repo: sorted(picked)}
-            self._save(rec)
-        return picked
+            self._note(run.record, f"Test secrets given to Repo {repo!r}'s {given_to}: {', '.join(wanted)} (names only; values are never recorded)")
+        return have
 
     def _dependency_base_ref(self, product: ProductConfig, name: str, base_branch: str) -> str:
         """Where to read the Base branch of a Repo the run does not touch: the Code host's, just
@@ -766,8 +852,9 @@ def _missing_on_branch(source: str, ref: str, path: str) -> bool:
     return subprocess.run(["git", "-C", source, "cat-file", "-e", f"{ref}:{path}"], capture_output=True).returncode != 0
 
 
-def _recipe_secret_names(repo: str, source: str, ref: str) -> tuple[str, ...]:
-    """The Test secrets a Repo's Run recipe names on its Base branch (read at `ref`), by name.
+def _recipe_secret_names(repo: str, source: str, ref: str, services_only: bool = False) -> tuple[str, ...]:
+    """The Test secrets a Repo's Run recipe names on its Base branch (read at `ref`), by name: its
+    services' and its External MCP servers' (#56), or with `services_only` just the services'.
 
     A Repo with no recipe, or a recipe that cannot be read or parsed, names none here: the run
     itself reports an unusable recipe.
@@ -778,7 +865,8 @@ def _recipe_secret_names(repo: str, source: str, ref: str) -> tuple[str, ...]:
     if shown.returncode != 0:
         return ()
     try:
-        return parse_recipe(repo, shown.stdout).secrets
+        recipe = parse_recipe(repo, shown.stdout)
+        return recipe.secrets if services_only else recipe.all_secrets
     except RecipeError:
         return ()
 

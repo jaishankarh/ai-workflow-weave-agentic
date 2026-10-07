@@ -174,6 +174,11 @@ class RunRecord:
     # reason ({"repo", "service", "kind", "reason"}). None: no recipe named a database.
     environment_mcp_servers: list[dict] | None = None
     environment_mcp_omitted: list[dict] | None = None
+    # External MCP servers (#56) started for the run, by name only ({"name", "repo", "declared",
+    # "transport", "secrets": [Test secret names]}; never a value, command or url). None: none declared.
+    external_mcp_servers: list[dict] | None = None
+    # The Repos whose own committed MCP config (`.mcp.json`) the run ignored (#56). None: no Repo had one.
+    repo_mcp_config_ignored: list[str] | None = None
     # How the Environment was brought up (#51): "branches" (some Repo ran from the Story's work)
     # and/or "base" (every Repo at its Base branch), in order. ["branches", "base"] is the one retry.
     # None: the run had no Environment.

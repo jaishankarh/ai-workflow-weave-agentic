@@ -176,6 +176,7 @@ def engine(monkeypatch, stand_in_docker):
     monkeypatch.setattr(worker_module, "require_runtime", lambda runtime: None)
     monkeypatch.setattr(worker_module, "stage_skills", lambda sandbox, plan: None)
     monkeypatch.setattr(worker_module, "stage_user_files", lambda sandbox, make: "/home/user")
+    monkeypatch.setattr(worker_module, "stage_mcp_servers", lambda sandbox, servers: None)
     monkeypatch.setattr(worker_module, "ACPAgent", lambda **kwargs: object())
     monkeypatch.setattr(worker_module, "Conversation", no_conversation)
     ENGINE.agents_started = started

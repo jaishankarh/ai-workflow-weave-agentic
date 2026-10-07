@@ -231,8 +231,8 @@ x-weave:
 
 `command` is a string (run with `sh -c`) or a list (run as is). A recipe may have no services. It
 may also name the Repos it needs: `x-weave: {depends_on: [svc]}`. The other `x-weave` fields of
-Spec 2's external MCP servers are not read yet; `secrets` is (see "Test secrets"), and so are `seed` and
-`databases` (see "Environment MCP servers"). `seed`:
+`secrets` (see "Test secrets"), `seed`, `databases` (see "Environment MCP servers") and `external_mcp`
+(see "External MCP servers") are read too. `seed`:
 
 ```yaml
 x-weave:
@@ -343,8 +343,9 @@ database_mcp_kinds: [postgres, neo4j]     # kinds this Product enables; default 
 
 Only a database a recipe names is considered (nothing is guessed from an image). Each one of an
 enabled kind gets one read-write MCP server for the run, started by the agent's Claude Code from its
-user-level configuration (`~/.claude.json` `mcpServers`, written by `stage_mcp_servers` in
-`sandbox.py` after seeding and before the agent starts; never a working copy's `.mcp.json`), named
+managed MCP configuration (`/etc/claude-code/managed-mcp.json`, written by `stage_mcp_servers` in
+`sandbox.py` after seeding and before the agent starts, see "External MCP servers" for why it is not
+`~/.claude.json`; never a working copy's `.mcp.json`), named
 `<repo>-<service>` and given one host only: the database's address `<service>.<repo>` in that run's own
 Environment. Servers are processes in the run's sandbox and go with it. A named database of a kind the
 Product has not enabled gets no server, and neither does Redis (which is in the Environment only); the
@@ -368,6 +369,67 @@ containers the same Environment network and the same `<service>.<repo>` alias a 
 with, and the credentials are the committed recipe's, which neither command changes. Only the server's
 open connections end when the database container is replaced, so a server may need a fresh call or two to reconnect (a `reset`
 also empties the data and seeds it again, which the server then sees).
+
+#### External MCP servers, and a Repo's own MCP config (#56)
+
+Anything beyond the Environment's own databases is declared in the recipe:
+
+```yaml
+x-weave:
+  external_mcp:
+    - name: pay                      # the agent sees it as `<repo>-pay`
+      command: npx                   # a stdio server: started inside the run's own sandbox
+      args: [-y, pay-mcp@1.2.3]      # pin versions; nothing is expanded from the environment (`${` is refused)
+      secrets: [PAY_TEST_KEY]        # Test secrets it uses, by name; each is an environment variable of that name
+    - name: docs
+      url: https://mcp.example.test/mcp          # or a remote server
+      headers: {Authorization: "Bearer ${DOCS_TOKEN}"}   # `${NAME}` of a listed secret, the only expansion
+      secrets: [DOCS_TOKEN]
+```
+
+*Each run has its own copy.* A stdio server is a process the agent's Claude Code starts inside that
+run's sandbox from configuration staged only there; it goes with the sandbox and no other run can
+reach it. (A `url` server is somebody else's service, not a copy; it is for test accounts and
+sandboxes only because only Test secrets can reach it.)
+
+*Only the Test secrets it names.* A stdio server is started through `/bin/sh -c 'exec env -i
+PATH=... HOME=... NAME=... "$@"'`, so it sees exactly `PATH`, `HOME` and its named secrets: Claude Code
+starts a server in its own environment plus the entry's `env`, and the sandbox's environment carries
+the Subscription's credential. A recipe cannot name a Tracker or Code host token variable (`GH_TOKEN`,
+`GITHUB_TOKEN`, ... `CODE_HOST_TOKEN_VARS`) as a secret, a `url` cannot be the push gateway, and before
+anything is staged the run checks that no server's configuration holds the push gateway's run token,
+the gateway's address, or any Code host token the worker or the Subscription has: otherwise the run
+ends as `needs-setup`, naming the server and no value. Test secrets reach the managed MCP file
+(mode 0600, in the run's sandbox only) in the clear, as the databases' credentials do. Not covered:
+the run token also sits in the working copies' git remote URLs (ADR 0009), which a stdio server
+running as root in the sandbox could read from disk; the server is the Repo's declared choice.
+
+*Missing secret.* `start` checks a touched Repo's External MCP secrets with the services' (`NeedsSetup`
+naming the Repo and the secret, before any sandbox); a dependency Repo's are read before any Repo's
+services start and end the run as `needs-setup` too. A server name already taken (`<repo>-<name>`
+against another Repo's or an Environment MCP server) is `needs-setup` as well. The record lists the
+servers started by name (`external_mcp_servers`: name, Repo, declared name, transport, secret names;
+never a value, command or url) and `run.log` has a line each.
+
+*A Repo's own MCP config is ignored.* Headless Claude Code (`claude -p`, the Agent SDK, so the
+sandbox's `claude-agent-acp`) loads a project `.mcp.json` **without asking**, so leaving it alone is not
+enough. Options weighed against Claude Code's current behaviour:
+
+| option | outcome |
+| --- | --- |
+| `enableAllProjectMcpServers: false` in settings | does not stop it: the server is still loaded in `-p` (checked) |
+| `disabledMcpjsonServers: [names]` | works for names read from the file, but it is name-based: a Repo adding a server later, or other project-scope sources (plugins enabled by the Repo's settings), are not covered |
+| delete or rename `.mcp.json` in the working copy | shows up in the diff the agent pushes; fragile |
+| **`/etc/claude-code/managed-mcp.json`** | **chosen**: once it exists, only its servers load (Repo `.mcp.json`, user-level, plugin servers and `--mcp-config` servers are ignored; `--mcp-config` is ignored with a warning, not fatal) |
+
+So at the start of every run, before the agent, `stage_mcp_servers` writes the managed file (empty);
+Environment MCP servers and External MCP servers are added to it as they start. This replaces #55's
+`~/.claude.json` staging: user-level servers do not load beside a managed file. Each Repo that
+commits a `.mcp.json` gets a line in `run.log` ("Repo 'x' commits an MCP config (.mcp.json) that this
+run ignores") and is listed in the record's `repo_mcp_config_ignored`. A Repo's own skills load as
+before. Verified with the real CLI (`claude` 2.1.293; the image pins 2.1.287), not unit-faked:
+`tests/test_external_mcp_servers.py::test_claude_code_loads_a_repos_committed_mcp_config_unless_managed_config_is_staged_and_then_only_ours`
+reads the `mcp_servers` of the headless `init` event with and without the file.
 
 #### Test secrets
 

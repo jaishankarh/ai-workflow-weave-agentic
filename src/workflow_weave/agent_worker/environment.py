@@ -51,6 +51,7 @@ from __future__ import annotations
 import re
 import shlex
 import time
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -58,8 +59,9 @@ from typing import Any, Callable, Mapping, Sequence
 import yaml
 
 from . import weave_env
-from .mcp import CATALOG, KINDS, NO_SERVER_KINDS, DatabaseSpec, default_port
+from .mcp import CATALOG, KINDS, NO_SERVER_KINDS, DatabaseSpec, ExternalMcpDecl, default_port
 from .model import Outcome
+from .push_gateway import CODE_HOST_TOKEN_VARS, GATEWAY_HOST
 from .secret_store import SECRET_NAME, redact
 
 # Fixed, and never the developer's `docker-compose.yml`.
@@ -168,6 +170,19 @@ class Recipe:
     seed: Seed | None = None
     # The databases the recipe names (#55); only these can get an Environment MCP server.
     databases: tuple[DatabaseSpec, ...] = ()
+    # The External MCP servers the recipe declares (#56).
+    external_mcp: tuple[ExternalMcpDecl, ...] = ()
+
+    @property
+    def external_mcp_secrets(self) -> tuple[str, ...]:
+        """The Test secrets the External MCP servers use, by name: kept apart from `secrets`, which
+        are the recipe's services', so that a service is never given one an MCP server uses."""
+        return tuple(dict.fromkeys(n for decl in self.external_mcp for n in decl.secrets))
+
+    @property
+    def all_secrets(self) -> tuple[str, ...]:
+        """Every Test secret the recipe names, for services and External MCP servers alike."""
+        return tuple(dict.fromkeys((*self.secrets, *self.external_mcp_secrets)))
 
 
 def parse_recipe(repo: str, text: str) -> Recipe:
@@ -213,7 +228,103 @@ def parse_recipe(repo: str, text: str) -> Recipe:
         secrets=_parse_secret_names(block, bad),
         seed=_parse_seed(block, names, bad),
         databases=_parse_databases(block, services, bad),
+        external_mcp=_parse_external_mcp(block, bad),
     )
+
+
+_EXTERNAL_FIELDS = ("name", "command", "args", "url", "headers", "secrets")
+_EXTERNAL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+_EXPANSION = re.compile(r"\$\{([^}]*)\}")
+
+
+def _parse_external_mcp(block: dict, bad: Callable[[str], RecipeError]) -> tuple[ExternalMcpDecl, ...]:
+    raw = block.get("external_mcp")
+    if raw is None:
+        return ()
+    where = f"`{WEAVE_KEY}.external_mcp`"
+    if not isinstance(raw, list):
+        raise bad(f"has {where} that is not a list of servers (name, command and args or url, secrets)")
+    found: list[ExternalMcpDecl] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise bad(f"has {where} with an entry that is not a mapping (name, command and args or url, secrets)")
+        name = entry.get("name")
+        if not isinstance(name, str) or not _EXTERNAL_NAME.fullmatch(name):
+            raise bad(f"has {where} with an entry whose `name` is missing or not letters, digits, - and _")
+        if any(d.name == name for d in found):
+            raise bad(f"names external server {name!r} twice in {where}")
+        here = f"{where} server {name!r}"
+        for key in entry:
+            if key not in _EXTERNAL_FIELDS:
+                raise bad(
+                    f"has {here} with an unknown field {str(key)!r}: a server is given only the Test secrets "
+                    f"it names in `secrets`, and nothing else from outside its declaration"
+                )
+        command, url = entry.get("command"), entry.get("url")
+        if command is not None and url is not None:
+            raise bad(f"has {here} that gives both a `command` and a `url`: it is one or the other")
+        if command is None and url is None:
+            raise bad(f"has {here} with neither a `command` (a stdio server) nor a `url` (a remote one)")
+        secrets = _external_secret_names(entry.get("secrets"), here, bad)
+        if command is not None:
+            if not isinstance(command, str) or not command.strip():
+                raise bad(f"has {here} whose `command` is not a non-empty string (put arguments in `args`)")
+            if "headers" in entry:
+                raise bad(f"has {here} with `headers`, which only a server with a `url` has")
+            args = entry.get("args", [])
+            if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                raise bad(f"has {here} whose `args` is not a list of strings")
+            for text in (command, *args):
+                if "${" in text:
+                    raise bad(f"has {here} with `${{` in its command or args: nothing is expanded from the "
+                              f"sandbox's environment; a Test secret reaches a stdio server as an environment variable")
+            found.append(ExternalMcpDecl(name, command=command, args=tuple(args), secrets=secrets))
+            continue
+        if "args" in entry:
+            raise bad(f"has {here} with `args`, which only a server with a `command` has")
+        if not isinstance(url, str) or not re.fullmatch(r"https?://\S+", url):
+            raise bad(f"has {here} whose `url` is not an http:// or https:// address")
+        if "${" in url:
+            raise bad(f"has {here} with `${{` in its `url`: a Test secret can only go in `headers`")
+        if urlsplit(url).hostname == GATEWAY_HOST:
+            raise bad(f"has {here} whose `url` is the push gateway ({GATEWAY_HOST}), which no External MCP server may reach")
+        headers = entry.get("headers", {})
+        if not isinstance(headers, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
+            raise bad(f"has {here} whose `headers` is not a mapping of strings")
+        used: set[str] = set()
+        for value in headers.values():
+            for ref in _EXPANSION.findall(value):
+                if ref not in secrets:
+                    raise bad(
+                        f"has {here} with `${{{ref}}}` in a header, but {ref!r} is not among its `secrets` "
+                        f"(only the Test secrets it names can be used)"
+                    )
+                used.add(ref)
+            if "${" in _EXPANSION.sub("", value):
+                raise bad(f"has {here} with a malformed `${{` in a header")
+        if unused := [n for n in secrets if n not in used]:
+            raise bad(f"has {here} that names secret {unused[0]!r} but no header uses it as `${{{unused[0]}}}`")
+        found.append(ExternalMcpDecl(name, url=url, headers=tuple(headers.items()), secrets=secrets))
+    return tuple(found)
+
+
+def _external_secret_names(raw: Any, here: str, bad: Callable[[str], RecipeError]) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(n, str) for n in raw):
+        raise bad(f"has {here} whose `secrets` is not a list of secret names (names only, never values)")
+    for name in raw:
+        if not SECRET_NAME.fullmatch(name):
+            raise bad(f"has {here} naming secret {name!r}, which is not a valid environment variable name")
+        if name.upper() in CODE_HOST_TOKEN_VARS:
+            raise bad(
+                f"has {here} naming secret {name!r}, a Tracker or Code host token variable: no External MCP "
+                f"server may be given one (ADR 0009)"
+            )
+    if len(set(raw)) != len(raw):
+        dup = next(n for n in raw if raw.count(n) > 1)
+        raise bad(f"names secret {dup!r} twice for {here}")
+    return tuple(raw)
 
 
 def _parse_databases(block: dict, services: dict, bad: Callable[[str], RecipeError]) -> tuple[DatabaseSpec, ...]:
