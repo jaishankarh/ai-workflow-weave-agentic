@@ -67,7 +67,7 @@ A file committed in a Repo that says how to bring that Repo's software up in an 
 _Avoid:_ "setup", "dev env" (both also mean a developer's machine).
 
 ## Environment
-An isolated, throwaway set of containers running a Story's software for one agent run (implement, review or proofs), brought up from Run recipes. Starts from each Repo's **Run images** where they exist, then runs pending migrations and **Seed scripts**; nothing it changes outlives the run or reaches another run. Each Repo in it is at: the agent's working copy for the Task being worked on; the Task branch for any other Repo the Story touches; the **Base branch** for a Repo the Story does not touch. A proof round uses one Environment for every Proof of the Story, captured one after another, once all the Story's Tasks have passed agent review; a round after rework starts from a fresh one.
+An isolated, throwaway set of containers running a Story's software for one agent run (implement, review or proofs), brought up from Run recipes. Starts from each Repo's **Run images** where they exist, then runs the Repo's migrate and seed commands, which apply only what its databases are missing; nothing it changes outlives the run or reaches another run. Each Repo in it is at: the agent's working copy for the Task being worked on; the Task branch for any other Repo the Story touches; the **Base branch** for a Repo the Story does not touch. A proof round uses one Environment for every Proof of the Story, captured one after another, once all the Story's Tasks have passed agent review; a round after rework starts from a fresh one.
 _Avoid:_ "staging" (the shared deploy target after merge), "sandbox" alone (the agent's own workspace), "proof environment".
 
 ## Run image
@@ -75,7 +75,7 @@ A prebuilt image of one service in a Repo's Run recipe, used by every Environmen
 _Avoid:_ "base image" (sounds like the Base branch, and like a Dockerfile's FROM image).
 
 ## Seed script
-A committed script that adds synthetic test data to a database, run at most once per database and recorded there, as a migration is. An Environment runs only the Seed scripts its Run image does not already contain. Never edited once it has run; a change is a new Seed script.
+A committed script that adds synthetic test data to a database. The Repo's own seed tooling records in the database which Seed scripts have run, as a migration tool does, so running the Repo's seed command again applies only those missing. The workflow only runs that command at every bring-up and never tracks anything itself. Append-only: one that has run is never edited; a change is a new Seed script.
 _Avoid:_ "fixtures" (also names in-test data), "seed" alone for the whole dataset.
 
 ## Test secrets
