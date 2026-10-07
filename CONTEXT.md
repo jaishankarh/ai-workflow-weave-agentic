@@ -127,6 +127,10 @@ _Avoid:_ reopening the earlier Story or moving it back to grilling.
 ## Deploy blocker
 A link saying a Story cannot go to staging until other work is merged. The other work is either a Task added to the same Story or a Follow-up Story. Work that is nice to have, rather than required, never becomes a Deploy blocker.
 
+## Start blocker
+A link saying a Story cannot start until another Story is merged, because it needs that Story's code or data structure. The Dispatcher never starts a blocked Story, even one marked ready-for-agent; it waits in its State until every Story blocking it is merged into its Repos' Base branches. Set in grilling or triage, always between Stories: a Task that needs a Task of another Story makes its whole Story blocked. Two Stories that must be built together are merged into one instead.
+_Avoid:_ "dependency" alone (also names the Repos a Run recipe needs), stacking one Story's branches on another's.
+
 ## Gate
 A State where the workflow waits for a human (grilling, triage, human review, merge). A Gate exists only as a State on the Tracker; nothing else holds a Story or Task's place while it waits.
 
