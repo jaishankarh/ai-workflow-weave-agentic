@@ -22,9 +22,16 @@ staged, so the Repo's own skill is the one the agent loads. In a run over
 several Repos this happens only when every Repo has the override and identical
 own skills; otherwise the central skill is staged and the disagreement
 reported. Every clash between a central skill and a Repo's own skill is
-reported too. Claude Code loads a user-level skill over a project skill of the
-same name, so a staged central skill shadows the Repo's own one without
-touching the working copy.
+reported too.
+
+**Hiding a shadowed Repo skill.** Claude Code loads a user-level skill over a
+project skill of the same name, but in a sandbox its session starts in the
+workspace folder, so a Repo's own skills are *nested* skills to it
+(`<repo>:<name>`). Claude Code keeps a nested skill available beside the
+user-level one and tells the agent to prefer it for files under that Repo
+(checked with Claude Code 2.1.287). So for every clash the plan also lists the
+nested name to turn off in the agent's user-level settings (`skillOverrides`),
+which leaves the working copy untouched.
 """
 
 from __future__ import annotations
@@ -91,6 +98,9 @@ def read_repo_skills(repo: str, source: str, base_branch: str, overrides: frozen
 class StagingPlan:
     staged: dict[str, Skill] = field(default_factory=dict)
     overridden: list[str] = field(default_factory=list)
+    # Repos' own skills shadowed by a staged central skill, as the agent names them
+    # (`<repo>:<name>`); turned off at user level so the agent cannot load them.
+    hidden_repo_skills: list[str] = field(default_factory=list)
     # Human-readable lines for the run's log: clashes and override disagreements.
     notes: list[str] = field(default_factory=list)
 
@@ -130,6 +140,8 @@ def plan(central: CentralSkills, skill: str, repos: list[RepoSkills]) -> Staging
 
     for name in sorted(seen):
         result.notes.extend(_report(name, repos, name in result.overridden))
+        if name in result.staged:
+            result.hidden_repo_skills.extend(f"{r.repo}:{name}" for r in repos if name in r.own)
     result.overridden.sort()
     return result
 

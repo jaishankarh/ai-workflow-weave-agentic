@@ -17,7 +17,9 @@ from openhands.sdk.conversation.response_utils import get_agent_final_response
 
 from .config import WorkerSettings
 from .model import NeedsSetup, NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
-from .outcomes import DONE_MARK, GAVE_UP_MARK, classify_error, classify_final_reply, last_error_detail
+from .outcomes import (
+    DONE_MARK, GAVE_UP_MARK, classify_error, classify_final_reply, last_error_detail, with_agent_words,
+)
 from .sandbox import WORKDIR, Sandbox, SandboxError, stage_skills, stage_user_files
 from . import standards
 from .subscriptions import Lease
@@ -218,6 +220,9 @@ class AgentWorker:
             env, dropped = without_code_host_tokens({**run.lease.env, "ACP_PROMPT_MAX_RETRIES": "0"})
             if dropped:
                 self._note(rec, f"left out of the sandbox environment (Tracker / Code host tokens): {dropped}")
+            if removed := sorted(k for k in env if k in profile.sandbox_env_removed):
+                env = {k: v for k, v in env.items() if k not in removed}
+                self._note(rec, f"left out of the sandbox environment (Agent profile {profile.name}): {removed}")
             sandbox = Sandbox(
                 image=profile.image,
                 run_id=rec.run_id,
@@ -425,5 +430,5 @@ def _classify(status: str, conversation: Any, error_kinds: Any) -> tuple[Outcome
         return classify_final_reply(get_agent_final_response(events) or "")
     detail = last_error_detail(events)
     if detail is not None:
-        return classify_error(detail, error_kinds)
+        return classify_error(with_agent_words(detail, events), error_kinds)
     return Outcome.INFRA_FAILURE, f"the agent failed: its conversation ended as {status} with no error reported"

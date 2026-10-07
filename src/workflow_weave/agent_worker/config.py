@@ -123,6 +123,8 @@ class AgentProfile:
     `claude-code`); it defaults to the profile's name. `error_kinds` maps the
     agent's own error kinds to the outcome they mean; any other kind is an
     infra-failure. The default is claude-agent-acp's vocabulary.
+    `sandbox_env_removed` names environment variables that never reach the
+    sandbox, even if a Subscription's credential env names them.
     """
 
     name: str
@@ -131,10 +133,39 @@ class AgentProfile:
     acp_session_mode: str | None = None
     agent: str | None = None
     error_kinds: Mapping[str, Outcome] = field(default_factory=lambda: dict(CLAUDE_AGENT_ACP_ERROR_KINDS))
+    sandbox_env_removed: frozenset[str] = frozenset()
 
     @property
     def agent_provider(self) -> str:
         return self.agent or self.name
+
+
+# Built from sandbox/claude-code/Dockerfile (see README "Images").
+CLAUDE_CODE_IMAGE = "weave/claude-code:dev"
+# Either of these would win over CLAUDE_CODE_OAUTH_TOKEN, so the run would not use
+# the subscription (#13).
+CLAUDE_CODE_ENV_REMOVED = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"})
+
+
+def claude_code_profile(
+    *, image: str = CLAUDE_CODE_IMAGE, acp_command: list[str] | None = None, name: str = "claude-code"
+) -> AgentProfile:
+    """The Claude Code Agent profile on a subscription token.
+
+    Its Subscriptions' credential env is `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`).
+    Claude Code runs through claude-agent-acp in `bypassPermissions` mode (allowed as root
+    because the image sets `IS_SANDBOX=1`), so a run never stops for a permission prompt.
+    `acp_command` is replaceable only so tests can put the probe in Claude Code's place.
+    """
+    return AgentProfile(
+        name=name,
+        image=image,
+        acp_command=acp_command or ["claude-agent-acp"],
+        acp_session_mode="bypassPermissions",
+        agent="claude-code",
+        error_kinds=dict(CLAUDE_AGENT_ACP_ERROR_KINDS),
+        sandbox_env_removed=CLAUDE_CODE_ENV_REMOVED,
+    )
 
 
 @dataclass(frozen=True)

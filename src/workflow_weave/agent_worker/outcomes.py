@@ -68,6 +68,26 @@ def classify_final_reply(reply: str) -> tuple[Outcome, str | None]:
     return Outcome.AGENT_GAVE_UP, "agent gave up: it ended without reporting the skill complete"
 
 
+def with_agent_words(detail: str, events: Iterable[Any]) -> str:
+    """The error detail, plus what the agent said in the failed turn when the detail lacks it.
+
+    claude-agent-acp reports a rejected credential as ACP's bare "Authentication
+    required" (-32000) and streams Claude Code's own error (e.g. "API Error: 401 OAuth
+    access token is invalid.") as the agent's reply, so the reason needs both.
+    """
+    said: list[str] = []
+    for ev in events:
+        kind = type(ev).__name__
+        if kind == "MessageEvent" and getattr(ev, "source", None) == "user":
+            said = []
+        elif kind == "StreamingDeltaEvent" and getattr(ev, "source", None) == "agent":
+            said.append(getattr(ev, "content", None) or "")
+    words = "".join(said).strip()
+    if not words or words in detail:
+        return detail
+    return f"{detail} (agent said: {words[:500]})"
+
+
 def last_error_detail(events: Iterable[Any]) -> str | None:
     """The detail of the conversation's last error event, if any."""
     detail = None
