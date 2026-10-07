@@ -439,12 +439,64 @@ class AgentWorker:
         self, run: _Run, product: ProductConfig, sandbox: Sandbox, refs: dict[str, str],
         environments: list[Environment],
     ) -> None:
-        """Bring up every Repo of the Environment, dependencies first (#50): the touched Repos that
-        have a Run recipe and, from their `depends_on`, the Repos the run does not touch. Each runs
-        from the branch its place in the Story calls for; the run record says which."""
+        """Bring up the Environment, and when it fails with the Story's branches in place, once more
+        with every Repo at its Base branch (#51). Raises EnvironmentBringUpError with the outcome:
+        `infra-failure` for a host or network fault (no retry), `needs-setup` if it fails at Base too
+        or already started at Base (the reason names the Repo, the service and the last log lines),
+        `environment-broken` if it comes up at Base but not with the branches. A healthy bring-up
+        pays for no retry."""
+        rec = run.record
+        placed, branches_in_place = self._place_environment(run, product, sandbox, refs, all_at_base=False)
+        rec.environment_bring_up_attempts = ["branches" if branches_in_place else "base"]
+        try:
+            self._bring_up_placed(run, sandbox, placed, environments)
+            return
+        except EnvironmentBringUpError as first:
+            if not (first.retryable and branches_in_place):
+                raise
+            self._note(rec, f"the Environment failed with the run's branches; retrying once with every Repo at "
+                            f"its Base branch: {first.reason}")
+            failed_with_branches = first
+            self._abandon_attempt(rec, environments)
+        rec.environment_bring_up_attempts.append("base")
+        self._save(rec)
+        placed, _ = self._place_environment(run, product, sandbox, refs, all_at_base=True)
+        try:
+            self._bring_up_placed(run, sandbox, placed, environments)
+        except EnvironmentBringUpError as second:
+            if second.outcome is Outcome.NEEDS_SETUP:
+                second.reason = (f"the Environment does not come up with every Repo at its Base branch either: "
+                                 f"{second.reason}")
+            raise
+        raise EnvironmentBringUpError(
+            f"the Environment comes up with every Repo at its Base branch but not with the Story's branches "
+            f"({failed_with_branches.reason})", Outcome.ENVIRONMENT_BROKEN,
+        ) from failed_with_branches
+
+    def _abandon_attempt(self, rec: RunRecord, environments: list[Environment]) -> None:
+        """End a failed bring-up before the retry: keep its service logs beside the event log (they go
+        with the containers otherwise), then take it down, last Repo first."""
+        saved = self._save_environment_logs(rec, environments, subdir="with-branches")
+        rec.environment_logs = {**(rec.environment_logs or {}), **{f"with-branches/{k}": v for k, v in saved.items()}}
+        self._save(rec)
+        for environment in reversed(environments):
+            environment.tear_down()
+        environments.clear()
+        rec.environment_services = None
+        rec.environment_seeds = None  # the retry seeds afresh; these ran in the Environment just taken down
+
+    def _place_environment(
+        self, run: _Run, product: ProductConfig, sandbox: Sandbox, refs: dict[str, str], *, all_at_base: bool
+    ) -> tuple[list[tuple[Placement, Recipe]], bool]:
+        """Every Repo of the Environment with its recipe, dependencies first (#50): the touched Repos
+        that have a Run recipe and, from their `depends_on`, the Repos the run does not touch. Each
+        runs from the branch its place in the Story calls for (or, with `all_at_base`, its Base
+        branch); the run record says which. Also whether any Repo runs from the Story's work rather
+        than from Base."""
         rec, request = run.record, run.request
         touched = {t.name: t for t in request.repos}
         with_base_recipe = {t.name for t in request.repos if _has_recipe(product.repos[t.name].source, refs[t.name])}
+        in_place: set[str] = set()  # Repos that run from something other than their Base branch
 
         def base_branch_of(name: str) -> str:
             return touched[name].base_branch if name in touched else product.repos[name].base_branch
@@ -455,16 +507,26 @@ class AgentWorker:
                 raise RecipeError(f"Repo {name!r} is named in a Run recipe's depends_on but is not part of "
                                   f"Product {request.product!r}")
             if placement.source == FROM_BASE_BRANCH:
-                sandbox.put_checkout(
-                    product.repos[name].source, name, self._dependency_base_ref(product, name, placement.branch),
-                    placement.path,
-                )
+                if all_at_base and name in touched:
+                    sandbox.put_base_checkout(name, placement.branch, placement.path)
+                else:
+                    sandbox.put_checkout(
+                        product.repos[name].source, name, self._dependency_base_ref(product, name, placement.branch),
+                        placement.path,
+                    )
             elif placement.source == FROM_TASK_BRANCH:
-                if not sandbox.put_task_branch_checkout(
+                if sandbox.put_task_branch_checkout(
                     name, placement.branch, touched[name].base_branch, placement.path
                 ):
+                    in_place.add(name)
+                else:
                     self._note(rec, f"Repo {name!r}: no Task branch {placement.branch!r} yet; its Environment "
                                     f"runs from Base branch {touched[name].base_branch}")
+            else:  # the agent's working copy: still the Base branch unless it holds the Story's work
+                base = shlex.quote(f"refs/heads/{touched[name].base_branch}")
+                same, _ = sandbox.run(f'test "$(git rev-parse HEAD)" = "$(git rev-parse {base})"', cwd=placement.path)
+                if same != 0:
+                    in_place.add(name)
             code, text = sandbox.run(f"cat {shlex.quote(RECIPE_PATH)}", cwd=placement.path)
             if code != 0:
                 if name in with_base_recipe:
@@ -474,21 +536,26 @@ class AgentWorker:
             return parse_recipe(name, text)
 
         try:
-            placed = resolve_environment(touched, request.working_repo, base_branch_of, load)
+            placed = resolve_environment(touched, request.working_repo, base_branch_of, load, all_at_base)
         except RecipeError as e:
             raise EnvironmentBringUpError(str(e)) from e
         rec.environment_repos = [p.as_record() for p, _ in placed]
         self._save(rec)
+        return placed, bool(in_place)
+
+    def _bring_up_placed(
+        self, run: _Run, sandbox: Sandbox, placed: list[tuple[Placement, Recipe]], environments: list[Environment]
+    ) -> None:
         for placement, recipe in placed:
             given = self._secrets_for_recipe(run, placement.repo, recipe)
             environment = Environment(
                 sandbox, placement.repo, now=_now, working_copy=placement.path, secrets=given
             )
             environments.append(environment)
-            self._bring_up(rec, environment, recipe, environments)
+            self._bring_up(run.record, environment, recipe, environments)
             if run.cancel_requested.is_set():
                 raise _Cancelled
-        self._seed(rec, environments)
+        self._seed(run.record, environments)
         # Tell `weave-env` what the Environment is (#54); written once it is up and seeded.
         sandbox.put_text(WEAVE_ENV_MANIFEST, json.dumps(environment_manifest([p for p, _ in placed], environments)))
         if run.cancel_requested.is_set():
@@ -575,7 +642,7 @@ class AgentWorker:
             self._best_effort(rec, "closing the agent's conversation", conversation.close)
         if sandbox is not None:
             if environments:
-                rec.environment_logs = self._save_environment_logs(rec, environments)
+                rec.environment_logs = {**(rec.environment_logs or {}), **self._save_environment_logs(rec, environments)}
             if conversation is not None:
                 leftovers = self._best_effort(rec, "listing processes left after close",
                                               lambda: _settle(sandbox.processes))
@@ -586,9 +653,11 @@ class AgentWorker:
             self._best_effort(rec, "removing the sandbox", sandbox.destroy)
         return leftovers
 
-    def _save_environment_logs(self, rec: RunRecord, environments: list[Environment]) -> dict[str, str]:
+    def _save_environment_logs(
+        self, rec: RunRecord, environments: list[Environment], subdir: str = ""
+    ) -> dict[str, str]:
         """Save every Environment service's log under the run's folder, beside the event log."""
-        destination = self._run_dir(rec.run_id) / ENVIRONMENT_LOGS_DIR
+        destination = self._run_dir(rec.run_id) / ENVIRONMENT_LOGS_DIR / subdir
         saved: dict[str, str] = {}
         for environment in environments:
             try:

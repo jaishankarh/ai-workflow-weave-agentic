@@ -119,7 +119,7 @@ def test_a_service_that_never_passes_its_check_is_never_ready_and_the_reason_nam
         env.bring_up(parse_recipe("svc", RECIPE))
     reason = str(e.value)
     assert "svc" in reason and "web" in reason and "10s" in reason and "no such table users" in reason
-    assert e.value.outcome is Outcome.NEEDS_SETUP  # the Base-branch retry that refines this is #51
+    assert e.value.outcome is Outcome.NEEDS_SETUP  # Environment alone; the Base retry is the worker's (#51)
     assert env.ready == [], "a service that did not pass was reported ready"
     assert sb.now >= 10
 

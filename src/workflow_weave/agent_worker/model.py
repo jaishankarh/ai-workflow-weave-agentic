@@ -51,6 +51,9 @@ class Outcome(str, enum.Enum):
     AGENT_GAVE_UP = "agent-gave-up"
     QUOTA_EXHAUSTED = "quota-exhausted"
     NEEDS_SETUP = "needs-setup"
+    # The Environment came up with every Repo at its Base branch but not with the run's branches (#51):
+    # the Story broke it. A Dispatcher treats it like red Checks; `reason` carries the logs.
+    ENVIRONMENT_BROKEN = "environment-broken"
 
 
 class RunState(str, enum.Enum):
@@ -166,6 +169,10 @@ class RunRecord:
     # The Test secrets given to the run (#52): the names each Repo's recipe asked for,
     # {"<repo>": [names]}. Never a value. None: no recipe named any.
     test_secrets_given: dict[str, list[str]] | None = None
+    # How the Environment was brought up (#51): "branches" (some Repo ran from the Story's work)
+    # and/or "base" (every Repo at its Base branch), in order. ["branches", "base"] is the one retry.
+    # None: the run had no Environment.
+    environment_bring_up_attempts: list[str] | None = None
 
     def status(self) -> RunStatus:
         return RunStatus(self.run_id, self.state, self.outcome, self.reason, self.tickets_done)
