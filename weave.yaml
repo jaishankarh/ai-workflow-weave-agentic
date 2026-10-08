@@ -6,3 +6,8 @@ subscription_store:
   # The Subscription store's config file (ADR 0010). It holds agent credentials, so it lives
   # on the Sandbox host outside any repo. Format: config/subscriptions.example.yaml.
   location: ~/.config/weave/subscriptions.yaml
+test_secrets:
+  # The folder of Test secrets files, one `<product>.yaml` per Product (CONTEXT.md, "Test secrets").
+  # They hold credentials for test accounts, so they live on the Sandbox host outside any repo,
+  # mode 0600. Format: config/test-secrets.example.yaml.
+  location: ~/.config/weave/secrets

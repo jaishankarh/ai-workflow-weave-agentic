@@ -8,9 +8,11 @@ from typing import Mapping
 
 import yaml
 
+from .mcp import CATALOG, NO_SERVER_KINDS
 from .model import Outcome
 from .outcomes import CLAUDE_AGENT_ACP_ERROR_KINDS
 from .push_gateway import PushGateway
+from .secret_store import SecretStore
 from .subscriptions import SubscriptionStore
 
 
@@ -72,6 +74,9 @@ class ProductConfigError(ValueError):
 class ProductConfig:
     name: str
     repos: dict[str, RepoConfig] = field(default_factory=dict)
+    # Database kinds of the built-in catalog this Product enables Environment MCP servers for (#55).
+    # A database a recipe names of any other kind gets no server.
+    database_mcp_kinds: frozenset[str] = frozenset()
 
 
 def load_product_config(path: str | Path, protected_skills: frozenset[str] = PROTECTED_SKILLS) -> ProductConfig:
@@ -79,6 +84,7 @@ def load_product_config(path: str | Path, protected_skills: frozenset[str] = PRO
 
     ```yaml
     product: ahdismoi
+    database_mcp_kinds: [postgres, neo4j]   # optional; Environment MCP servers for these kinds (#55)
     repos:
       ahdismoi:
         source: /srv/repos/ahdismoi
@@ -133,7 +139,25 @@ def load_product_config(path: str | Path, protected_skills: frozenset[str] = PRO
             base_branch=base,
             push_remote=push_remote,
         )
-    return ProductConfig(name=name, repos=repos)
+    return ProductConfig(name=name, repos=repos, database_mcp_kinds=_database_mcp_kinds(path, data))
+
+
+def _database_mcp_kinds(path: str | Path, data: dict) -> frozenset[str]:
+    kinds = data.get("database_mcp_kinds")
+    if kinds is None:
+        return frozenset()
+    if not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds):
+        raise ProductConfigError(f"{path}: 'database_mcp_kinds' must be a list of database kinds")
+    for kind in kinds:
+        if kind not in CATALOG:
+            reason = "Redis has no MCP server" if kind in NO_SERVER_KINDS else "not in the catalog"
+            raise ProductConfigError(
+                f"{path}: 'database_mcp_kinds' names {kind!r} ({reason}); the catalog has {', '.join(CATALOG)}"
+            )
+    if len(set(kinds)) != len(kinds):
+        dup = next(k for k in kinds if kinds.count(k) > 1)
+        raise ProductConfigError(f"{path}: 'database_mcp_kinds' names {dup!r} twice")
+    return frozenset(kinds)
 
 
 @dataclass(frozen=True)
@@ -204,3 +228,11 @@ class WorkerSettings:
     # The sandboxes' only git remote (ADR 0009). None: the worker starts its own,
     # listening on the Docker bridge gateway.
     push_gateway: PushGateway | None = None
+    # `docker run --runtime` for a run that needs an Environment, i.e. one with a touched Repo that
+    # has a Run recipe: "sysbox-runc" gives that run's sandbox its own Docker engine (ADR 0004).
+    # Runs with no Run recipe never use it and stay on the host's default runtime. None: this
+    # worker cannot give a run an Environment, so a run that needs one is an infra-failure.
+    sandbox_runtime: str | None = "sysbox-runc"
+    # The Products' Test secrets, one file each on the Sandbox host (`test_secrets.location` in
+    # weave.yaml). None: no Test secrets are configured, so a recipe naming a secret needs setup.
+    test_secrets: SecretStore | None = None

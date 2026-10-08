@@ -20,6 +20,7 @@ from typing import Callable
 import pytest
 
 from workflow_weave import central_skills
+from workflow_weave.agent_worker.sandbox import SYSBOX_RUNTIME
 from workflow_weave.agent_worker import (
     AgentProfile,
     AgentWorker,
@@ -47,6 +48,26 @@ FAKE_API_CLAUDE_CODE_IMAGE = f"weave/claude-code-fake-api:{_TAG}"
 PRODUCT = "probe-product"
 # The Subscription the default Product leases: roomy enough never to be full.
 PROBE_SUBSCRIPTION = "probe-subscription"
+
+
+def sysbox_available() -> bool:
+    """True when the Sandbox host's Docker lists the sysbox runtime. Never raises: no Docker CLI,
+    no daemon or an unreadable answer all mean "not available"."""
+    try:
+        out = subprocess.run(
+            ["docker", "info", "--format", "{{json .Runtimes}}"], capture_output=True, text=True, timeout=30
+        )
+        return out.returncode == 0 and "sysbox-runc" in json.loads(out.stdout or "{}")
+    except Exception:
+        return False
+
+
+# Tests that run a real sandbox on sysbox (nested Docker). Evaluated at collection, before any
+# image fixture is set up, so on a host without sysbox they skip instead of erroring.
+needs_sysbox = pytest.mark.skipif(
+    not sysbox_available(),
+    reason="needs a Linux Sandbox host with the sysbox runtime (`docker info` must list sysbox-runc)",
+)
 
 
 def _docker_build(tag: str, context: Path, build_args: dict[str, str]) -> None:
@@ -154,6 +175,32 @@ def commit_on_code_host(code_host: Path, files: dict[str, str], branch: str = "m
     return _git("-C", str(work), "rev-parse", "HEAD")
 
 
+def repo_with_recipe(
+    root: Path, name: str = "app", recipe: str = "x-weave: {}\n", extra_files: dict[str, str] | None = None
+) -> Path:
+    """An onboarded Repo that has a Run recipe (`.weave/compose.yaml`) committed on main. The
+    default recipe has no services: an Environment with nothing to start, but a run that needs
+    one (so a sandbox on sysbox)."""
+    return make_repo(
+        root / name,
+        {
+            "CONTEXT.md": f"# Context: {name}\n\nGlossary only.\n",
+            ".weave/compose.yaml": recipe,
+            **(extra_files or {}),
+        },
+    )
+
+
+def product_yaml_for(
+    repos: dict[str, Path], product: str = "probe-product", database_mcp_kinds: tuple[str, ...] = ()
+) -> str:
+    """Product config text for `make_worker(product_yaml=...)` with these Repos (name -> clone), and
+    the database kinds the Product enables Environment MCP servers for."""
+    lines = "".join(f"  {name}:\n    source: {path}\n" for name, path in repos.items())
+    kinds = f"database_mcp_kinds: [{', '.join(database_mcp_kinds)}]\n" if database_mcp_kinds else ""
+    return f"product: {product}\n{kinds}repos:\n{lines}"
+
+
 @pytest.fixture
 def onboarded_repo(tmp_path: Path) -> Path:
     """A small Repo that has been onboarded (it has a CONTEXT.md)."""
@@ -213,6 +260,7 @@ def make_worker(
         product_yaml: str | None = None,
         central_skills_location: Path | None = None,
         agent_profiles: dict[str, AgentProfile] | None = None,
+        sandbox_runtime: str | None = SYSBOX_RUNTIME,
     ) -> AgentWorker:
         if central_skills_location is None:
             # This repo's Central skills, plus a coding-standards file for each test Product.
@@ -230,6 +278,7 @@ def make_worker(
             subscriptions=subscriptions or load_subscription_store(default_store),
             sandbox_nofile_limit=_nofile_limit(),
             central_skills_location=central_skills_location,
+            sandbox_runtime=sandbox_runtime,
         )
         return AgentWorker(settings)
 
