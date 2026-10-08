@@ -51,6 +51,8 @@ class Engine:
         self.breaks: dict[str, str | None] = {"/workspace": None, "/weave/env/src": None}
         self.seed_breaks: dict[str, str | None] = {"/workspace": None, "/weave/env/src": None}
         self.secret_echo = ""
+        # What `cat .weave/compose.yaml` shows in the working copy / at Base, when not the healthy RECIPE.
+        self.recipe_text: dict[str, str | None] = {"/workspace": None, "/weave/env/src": None}
         self.commands: list[str] = []
         self.files: dict[str, str] = {}
 
@@ -102,7 +104,8 @@ class ScriptedSandbox:
     def run(self, command, timeout=120, cwd="/workspace"):
         ENGINE.commands.append(command)
         if command.startswith("cat "):
-            return 0, ENGINE_RECIPE[0]
+            where = "/workspace" if cwd.startswith("/workspace") else "/weave/env/src"
+            return 0, ENGINE.recipe_text[where] or ENGINE_RECIPE[0]
         if "rev-parse HEAD" in command:  # is the working copy still at the Base branch?
             return (0 if ENGINE.working_copy_at_base else 1), ""
         if command.startswith("docker inspect"):
@@ -430,3 +433,40 @@ def test_no_test_secret_value_is_written_when_a_seed_fails_on_either_attempt(mak
         if path.is_file():
             assert KOR_KEY not in path.read_text(), f"{path.name} holds a Test secret value"
     assert KOR_KEY not in (final.reason or "")
+
+
+# ---------------------------------------------------------------------------- a recipe the branches broke (#51)
+
+BROKEN_RECIPE = "x-weave: [this is not a mapping]\n"
+
+
+def test_a_run_recipe_the_stories_branch_broke_is_retried_at_base_and_gives_environment_broken(
+    make_worker, tmp_path, engine
+):
+    engine.recipe_text["/workspace"] = BROKEN_RECIPE
+    worker, _, final, record = run_to_the_end(make_worker, tmp_path)
+    assert final.outcome is Outcome.ENVIRONMENT_BROKEN, final.reason
+    assert "svc" in final.reason and "x-weave" in final.reason
+    assert record.environment_bring_up_attempts == ["branches", "base"]
+    assert len(ups(engine)) == 1, "only the retry at Base has a recipe to bring up"
+    assert_no_agent_and_the_lease_released(engine, worker, final)
+
+
+def test_a_run_recipe_broken_at_base_too_gives_needs_setup_after_the_retry(make_worker, tmp_path, engine):
+    engine.recipe_text.update({"/workspace": BROKEN_RECIPE, "/weave/env/src": BROKEN_RECIPE})
+    worker, _, final, record = run_to_the_end(make_worker, tmp_path)
+    assert final.outcome is Outcome.NEEDS_SETUP, final.reason
+    assert "Base branch either" in final.reason and "svc" in final.reason
+    assert record.environment_bring_up_attempts == ["branches", "base"]
+    assert_no_agent_and_the_lease_released(engine, worker, final)
+
+
+def test_a_broken_run_recipe_in_a_first_implement_run_starting_at_base_gives_needs_setup_with_no_retry(
+    make_worker, tmp_path, engine
+):
+    engine.working_copy_at_base = True
+    engine.recipe_text["/workspace"] = BROKEN_RECIPE
+    worker, _, final, record = run_to_the_end(make_worker, tmp_path)
+    assert final.outcome is Outcome.NEEDS_SETUP, final.reason
+    assert record.environment_bring_up_attempts == ["base"]
+    assert_no_agent_and_the_lease_released(engine, worker, final)

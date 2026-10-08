@@ -195,3 +195,19 @@ def test_a_service_whose_logs_cannot_be_read_does_not_stop_the_others_being_save
         env.save_logs(tmp_path)
     assert "web" in str(e.value)
     assert (tmp_path / "svc/db.log").exists()
+
+
+def test_a_readiness_timeout_counts_from_after_up_returns_not_from_before_it_pulled_and_built():
+    attempts = {"n": 0}
+
+    def script(command, sb):
+        if " up " in command and "--no-start" in command:
+            sb.now += 300  # pulling and building images takes far longer than the 10s timeout
+        if " exec -T web " in command:
+            attempts["n"] += 1
+            return (0 if attempts["n"] >= 3 else 1), ""
+        return 0, ""
+
+    sb = FakeSandbox(script)
+    ready = environment(sb).bring_up(parse_recipe("svc", RECIPE))
+    assert [r.service for r in ready] == ["web", "db"], "the slow build used up the readiness timeout"

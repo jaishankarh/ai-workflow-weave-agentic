@@ -222,3 +222,60 @@ def parse_db(service):
     from workflow_weave.agent_worker.mcp import DatabaseSpec
 
     return DatabaseSpec(service=service, kind="postgres", port=5432, user="u", password="p", database="d")
+
+
+def test_a_readiness_timeout_counts_from_after_up_returns_not_from_before_it_built_the_image(tmp_path):
+    attempts = {"n": 0}
+    shell = Shell()
+
+    def script(command):
+        if " up " in command and "--no-start" in command:
+            shell.now += 300  # a slow build must not use up the 10s readiness timeout
+        if "pg_isready" in command and " exec " in command:
+            attempts["n"] += 1
+            return (0, "") if attempts["n"] >= 3 else (1, "starting")
+        return None
+
+    shell.script = script
+    code, out, _, _ = weave(tmp_path, "rebuild", "svc", shell=shell)
+    assert code == 0, out
+
+
+def _manifest_as_the_worker_writes_it(tmp_path):
+    """Three Repos: `dep` (not touched, pulled in by depends_on: Base checkout), `other` (touched,
+    runs from its Task branch checkout) and `app` (the one being worked on: its working copy)."""
+    import json
+
+    from test_weave_env import FakeSandbox
+    from workflow_weave.agent_worker.environment import Environment, Placement, environment_manifest, parse_recipe
+
+    recipe = "services:\n  web: {image: alpine}\nx-weave:\n  readiness:\n    web: {command: 'true'}\n"
+    places = [
+        Placement("dep", "Base branch", "main", "/weave/env/src/dep", False),
+        Placement("other", "Task branch", "story", "/weave/env/src/other", True),
+        Placement("app", "working copy", "story", "/workspace/app", True),
+    ]
+    environments = []
+    for place in places:
+        env = Environment(FakeSandbox(), place.repo, now=lambda: "t", working_copy=place.path)
+        env.bring_up(parse_recipe(place.repo, recipe))
+        environments.append(env)
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(environment_manifest(places, environments)))
+    return path
+
+
+def test_rebuild_of_a_touched_repo_other_than_the_one_worked_on_builds_from_the_agents_working_copy(tmp_path):
+    path = _manifest_as_the_worker_writes_it(tmp_path)
+    code, out, shell, _ = weave(tmp_path, "rebuild", "other", manifest=path)
+    assert code == 0, out
+    (create,) = [c for c in compose_commands(shell, "up", "other") if "--no-start" in c]
+    assert argv_of(create)[argv_of(create).index("-f") + 1] == "/workspace/other/.weave/compose.yaml"
+
+
+def test_rebuild_of_a_repo_the_story_does_not_touch_has_no_working_copy_and_builds_from_where_it_runs(tmp_path):
+    path = _manifest_as_the_worker_writes_it(tmp_path)
+    code, out, shell, _ = weave(tmp_path, "rebuild", "dep", manifest=path)
+    assert code == 0, out
+    (create,) = [c for c in compose_commands(shell, "up", "dep") if "--no-start" in c]
+    assert argv_of(create)[argv_of(create).index("-f") + 1] == "/weave/env/src/dep/.weave/compose.yaml"

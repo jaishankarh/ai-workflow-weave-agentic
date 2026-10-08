@@ -20,7 +20,7 @@ from openhands.sdk.conversation.response_utils import get_agent_final_response
 from .config import ProductConfig, WorkerSettings
 from . import git
 from .git import GitError
-from .model import NeedsSetup, NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
+from .model import NeedsSetup, NoCapacity, Outcome, RepoTarget, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
 from .outcomes import (
     DONE_MARK, GAVE_UP_MARK, classify_error, classify_final_reply, last_error_detail, with_agent_words,
 )
@@ -178,11 +178,15 @@ class AgentWorker:
             # Services' and External MCP servers' alike: a missing one stops the run before it starts.
             if (names := _recipe_secret_names(t.name, product.repos[t.name].source, refs[t.name]))
         }
-        if not named:
+        # Every recipe the run can bring up must have its secrets: also a Task branch's, and a Repo the
+        # run does not touch but a recipe depends on. Only the first are read here; the others are read
+        # when their recipe is loaded.
+        in_play = self._secrets_in_play(request, product, refs)
+        if not in_play:
             return None, {}
         store = self.settings.test_secrets
         if store is None:
-            repo, names = next(iter(named.items()))
+            repo, names = next(iter(in_play.items()))
             return (
                 f"Repo {repo!r} names Test secret {names[0]!r} but no Test secrets are configured "
                 f"(`test_secrets.location` in weave.yaml): add {request.product!r}'s Test secrets file",
@@ -191,15 +195,54 @@ class AgentWorker:
         try:
             have = store.for_product(request.product)
         except SecretsError as e:
-            repo, names = next(iter(named.items()))
+            repo, names = next(iter(in_play.items()))
             return f"Repo {repo!r} names Test secret {names[0]!r}: {e}", {}
-        lacking = [f"Repo {repo!r} names Test secret {n!r}" for repo, names in named.items() for n in have.missing(names)]
+        lacking = [f"Repo {repo!r} names Test secret {n!r}" for repo, names in in_play.items() for n in have.missing(names)]
         if lacking:
             return (
                 "; ".join(lacking) + f" that Product {request.product!r} does not have: add it to {have.path}",
                 {},
             )
         return None, {repo: have.select(names) for repo, names in named.items()}
+
+    def _secrets_in_play(
+        self, request: RunRequest, product: ProductConfig, refs: dict[str, str]
+    ) -> dict[str, tuple[str, ...]]:
+        """Repo -> the Test secrets named by any Run recipe this run may bring up: each touched Repo's
+        recipe on its Base branch and, for a Repo other than the one being worked on, on its Task
+        branch (as the sandbox's clone will have it); and, following `depends_on`, the recipes of the
+        Repos pulled in, at their Base branch. Read from the Sandbox host's clones; no sandbox."""
+        named: dict[str, dict[str, None]] = {}
+        queue: list[tuple[str, str, str]] = []
+        for t in request.repos:
+            source = product.repos[t.name].source
+            queue.append((t.name, source, refs[t.name]))
+            if t.name != request.working_repo:
+                queue.append((t.name, source, f"refs/heads/{t.integration_branch}"))
+        seen: set[tuple[str, str]] = set()
+        while queue:
+            repo, source, ref = queue.pop(0)
+            if (repo, ref) in seen:
+                continue
+            seen.add((repo, ref))
+            recipe = _recipe_at(repo, source, ref)
+            if recipe is None:
+                continue
+            for name in recipe.all_secrets:
+                named.setdefault(repo, {})[name] = None
+            for dependency in recipe.depends_on:
+                if dependency not in product.repos:
+                    continue  # the run reports an unknown Repo when it loads the recipe
+                if dependency in refs:
+                    queue.append((dependency, product.repos[dependency].source, refs[dependency]))
+                    continue
+                base = product.repos[dependency].base_branch
+                try:
+                    where = self._dependency_base_ref(product, dependency, base)
+                except GitError:
+                    where = f"refs/heads/{base}"  # the run itself reports a Code host it cannot reach
+                queue.append((dependency, product.repos[dependency].source, where))
+        return {repo: tuple(names) for repo, names in named.items()}
 
     def _central_location(self) -> Path | None:
         loc = self.settings.central_skills_location
@@ -285,7 +328,10 @@ class AgentWorker:
             refs = _base_refs(run.request, product, code_hosts, strict=True)
             # Only a run with a touched Repo that has a Run recipe gets an Environment, and so a
             # sandbox on sysbox; every other run stays on the default runtime, unchanged.
-            with_recipe = [t.name for t in run.request.repos if _has_recipe(product.repos[t.name].source, refs[t.name])]
+            with_recipe = [
+                t.name for t in run.request.repos
+                if _has_recipe_in_place(t, product.repos[t.name].source, refs[t.name], run.request.working_repo)
+            ]
             # The Test secrets the recipes name, from the Product's own file (the same check `start`
             # made; repeated because the file may have changed since). Before any sandbox exists.
             problem, run.test_secrets = self._test_secrets(run.request, product, refs)
@@ -459,25 +505,35 @@ class AgentWorker:
         with every Repo at its Base branch (#51). Raises EnvironmentBringUpError with the outcome:
         `infra-failure` for a host or network fault (no retry), `needs-setup` if it fails at Base too
         or already started at Base (the reason names the Repo, the service and the last log lines),
-        `environment-broken` if it comes up at Base but not with the branches. A healthy bring-up
+        `environment-broken` if it comes up at Base but not with the branches (a service that will not
+        start, a seed that fails, or a Run recipe the branches broke). A healthy bring-up
         pays for no retry."""
         rec = run.record
-        placed, branches_in_place = self._place_environment(run, product, sandbox, refs, all_at_base=False)
-        rec.environment_bring_up_attempts = ["branches" if branches_in_place else "base"]
         try:
-            self._bring_up_placed(run, sandbox, placed, environments)
-            return
+            placed, branches_in_place = self._place_environment(run, product, sandbox, refs, all_at_base=False)
         except EnvironmentBringUpError as first:
-            if not (first.retryable and branches_in_place):
+            # A Run recipe the Story's branches broke or removed: tried again at Base like a service that fails.
+            if not first.retryable:
                 raise
-            self._note(rec, f"the Environment failed with the run's branches; retrying once with every Repo at "
-                            f"its Base branch: {first.reason}")
+            self._note(rec, f"the Environment could not be set up with the run's branches; retrying once with every "
+                            f"Repo at its Base branch: {first.reason}")
             failed_with_branches = first
-            self._abandon_attempt(rec, environments)
+        else:
+            rec.environment_bring_up_attempts = ["branches" if branches_in_place else "base"]
+            try:
+                self._bring_up_placed(run, sandbox, placed, environments)
+                return
+            except EnvironmentBringUpError as first:
+                if not (first.retryable and branches_in_place):
+                    raise
+                self._note(rec, f"the Environment failed with the run's branches; retrying once with every Repo at "
+                                f"its Base branch: {first.reason}")
+                failed_with_branches = first
+                self._abandon_attempt(rec, environments)
         rec.environment_bring_up_attempts.append("base")
         self._save(rec)
-        placed, _ = self._place_environment(run, product, sandbox, refs, all_at_base=True)
         try:
+            placed, _ = self._place_environment(run, product, sandbox, refs, all_at_base=True)
             self._bring_up_placed(run, sandbox, placed, environments)
         except EnvironmentBringUpError as second:
             if second.outcome is Outcome.NEEDS_SETUP:
@@ -511,7 +567,9 @@ class AgentWorker:
         than from Base."""
         rec, request = run.record, run.request
         touched = {t.name: t for t in request.repos}
-        with_base_recipe = {t.name for t in request.repos if _has_recipe(product.repos[t.name].source, refs[t.name])}
+        with_base_recipe = {
+            t.name for t in request.repos if _has_recipe_at(t.name, product.repos[t.name].source, refs[t.name])
+        }
         in_place: set[str] = set()  # Repos that run from something other than their Base branch
 
         def base_branch_of(name: str) -> str:
@@ -554,7 +612,11 @@ class AgentWorker:
         try:
             placed = resolve_environment(touched, request.working_repo, base_branch_of, load, all_at_base)
         except RecipeError as e:
-            raise EnvironmentBringUpError(str(e)) from e
+            # Seen with the Story's branches in place, a recipe that cannot be used may be the Story's
+            # doing (a broken or removed file, a new cycle): worth trying again at Base (#51).
+            if not all_at_base:
+                rec.environment_bring_up_attempts = ["branches" if in_place else "base"]
+            raise EnvironmentBringUpError(str(e), retryable=bool(in_place) and not all_at_base) from e
         rec.environment_repos = [p.as_record() for p, _ in placed]
         self._save(rec)
         return placed, bool(in_place)
@@ -859,24 +921,59 @@ def _recipe_secret_names(repo: str, source: str, ref: str, services_only: bool =
     A Repo with no recipe, or a recipe that cannot be read or parsed, names none here: the run
     itself reports an unusable recipe.
     """
-    if not _has_recipe(source, ref):
+    recipe = _recipe_at(repo, source, ref)
+    if recipe is None:
         return ()
-    shown = subprocess.run(["git", "-C", source, "show", f"{ref}:{RECIPE_PATH}"], capture_output=True, text=True)
-    if shown.returncode != 0:
-        return ()
+    return recipe.secrets if services_only else recipe.all_secrets
+
+
+def _recipe_at(repo: str, source: str, ref: str) -> Recipe | None:
+    """A Repo's parsed Run recipe as committed at `ref` in its clone, or None when there is none or it
+    cannot be read or parsed (the run itself reports that, so the pre-checks here do not refuse it)."""
     try:
-        recipe = parse_recipe(repo, shown.stdout)
-        return recipe.secrets if services_only else recipe.all_secrets
-    except RecipeError:
-        return ()
+        if not _has_recipe_at(repo, source, ref):
+            return None
+        shown = subprocess.run(["git", "-C", source, "show", f"{ref}:{RECIPE_PATH}"], capture_output=True, text=True)
+        return parse_recipe(repo, shown.stdout) if shown.returncode == 0 else None
+    except (GitError, RecipeError):
+        return None
+
+
+def _has_recipe_at(repo: str, source: str, ref: str) -> bool:
+    """`_has_recipe`, or False when the clone cannot be read at all (a pre-check never refuses on that)."""
+    try:
+        return _has_recipe(source, ref)
+    except GitError:
+        return False
+
+
+def _has_recipe_in_place(target: RepoTarget, source: str, base_ref: str, working_repo: str) -> bool:
+    """True when the Repo has a Run recipe where its Environment would run from: on its Base branch,
+    or, for a Repo other than the one being worked on, on its Task branch (the Integration branch, as
+    the sandbox's clone has it), where a Story may have added the Repo's first recipe. A Repo that
+    cannot be read raises GitError: that is a fault to report, not a Repo with no recipe."""
+    try:
+        if _has_recipe(source, base_ref):
+            return True
+        task_branch = f"refs/heads/{target.integration_branch}"
+        return (
+            target.name != working_repo and git.has_commit(source, task_branch) and _has_recipe(source, task_branch)
+        )
+    except GitError as e:
+        raise GitError(f"Repo {target.name!r}: {e}") from e
 
 
 def _has_recipe(source: str, ref: str) -> bool:
-    """True when a readable Repo has a Run recipe on its Base branch (read at `ref`).
-
-    A Repo or branch that cannot be read is not taken to have one: the run itself reports it.
-    """
-    return git.has_commit(source, ref) and not _missing_on_branch(source, ref, RECIPE_PATH)
+    """True when the Repo has a Run recipe at `ref` in its clone; False only when it genuinely has
+    none. GitError when the clone or `ref` cannot be read: that is not "no recipe"."""
+    if not git.has_commit(source, ref):
+        raise GitError(f"cannot read {ref!r} in the clone at {source}")
+    listed = subprocess.run(
+        ["git", "-C", source, "ls-tree", "-r", "--name-only", ref, "--", RECIPE_PATH], capture_output=True, text=True
+    )
+    if listed.returncode != 0:
+        raise GitError(f"cannot look for {RECIPE_PATH} at {ref!r} in the clone at {source}: {listed.stderr.strip()}")
+    return bool(listed.stdout.strip())
 
 
 def _code_host_remotes(request: RunRequest, product: ProductConfig) -> dict[str, str | None]:

@@ -16,8 +16,9 @@ which Compose ignores, so the file also runs with plain `docker compose -f .weav
           interval: 1              # seconds between attempts (default 1)
 
 `command` is a string (run with `sh -c`) or a list (run as is); exit status 0 means ready. A recipe
-may have no services at all. Other `x-weave` fields (dependencies, seed, secrets, databases, MCP
-servers) belong to later tickets of Spec 2 and are ignored here, except `secrets`:
+may have no services at all. The other `x-weave` fields are `depends_on` (#50), `seed` (#53),
+`secrets` (#52), `databases` (Environment MCP servers, #55) and `external_mcp` (External MCP servers,
+#56), each described where it is parsed; an unknown field is ignored. `secrets`:
 
     x-weave:
       secrets: [KORONA_API_KEY]   # Test secrets this Repo's services need, by name only
@@ -30,8 +31,9 @@ Several Repos (#50): `x-weave.depends_on` lists the Repos this one needs (`depen
 are brought up first, each as its own Compose project. A recipe may have no services and only
 `depends_on`.
 
-Seeding (#53): every Environment starts from empty databases, and a Repo that needs data says how to
-put it there with a seed, a service and a command:
+Seeding (#53): in this Spec every Environment starts from empty databases (Spec 2b changes that:
+ADR 0011 gives a Repo Run images with base test data baked in, so a seed there only adds what is
+missing), and a Repo that needs data says how to put it there with a seed, a service and a command:
 
     x-weave:
       seed:
@@ -95,8 +97,9 @@ class RecipeError(ValueError):
 class EnvironmentBringUpError(RuntimeError):
     """The Environment could not be brought up. Raised before any agent starts.
 
-    `retryable` is true only for a service that would not start or become ready (#51): the one
-    failure a Story's own branches can cause, so the only one worth trying again at Base.
+    `retryable` is true only for what a Story's own branches can cause (#51), the failures worth
+    trying again at Base: a service that would not start or become ready, a seed that failed, or a
+    Run recipe the branches broke or removed.
     """
 
     def __init__(self, reason: str, outcome: Outcome = Outcome.NEEDS_SETUP, retryable: bool = False) -> None:
@@ -635,9 +638,11 @@ class Environment:
                 f"{self._redacted(_tail(out))}", out,
             )
         self._name_in_sandbox(containers)
+        # A readiness `timeout` is seconds after `up` has returned: pulling and building is not part of it.
+        up_returned = self._clock()
         for service in recipe.services:
             check = recipe.readiness[service]
-            deadline = started + check.timeout
+            deadline = up_returned + check.timeout
             while True:
                 code, last = self.sandbox.run(
                     self._compose("exec", "-T", service, *check.command), timeout=min(check.timeout, 60), cwd="/"
@@ -824,7 +829,11 @@ def environment_manifest(placements: Sequence["Placement"], environments: Sequen
     entries = []
     for environment in environments:
         placement = by_repo[environment.repo]
-        entries.append({**placement.as_record(), "path": placement.path, **environment.describe()})
+        # A Repo the Story touches has a clone in the agent's /workspace, where its edits are; `weave-env
+        # rebuild` builds from there whatever the Environment first ran from (#54). A dependency has none.
+        working_copy = f"{WORKDIR}/{placement.repo}/{RECIPE_PATH}" if placement.touched else None
+        entries.append({**placement.as_record(), "path": placement.path,
+                        "working_copy_recipe_file": working_copy, **environment.describe()})
     return weave_env.manifest(entries, NETWORK)
 
 

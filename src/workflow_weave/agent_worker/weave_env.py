@@ -20,6 +20,11 @@ Output is redacted of those values too.
 The manifest is absent when the run has no Environment (no touched Repo has a Run recipe); the
 command then says so rather than failing.
 
+`rebuild <repo>` builds from the agent's working copy, `/workspace/<repo>`, whenever the Repo has one
+(every Repo the Story touches, even one that first came up from its Task branch checkout under
+`/weave/env/src`); a Repo pulled in only by `depends_on` has none and is rebuilt from where it runs.
+`reset` brings every Repo up again from where it first came up.
+
 The steps of a bring-up here (create, join the Environment network under `<service>.<repo>`, start,
 name the services in /etc/hosts, wait for readiness, seed) are the ones `Environment.bring_up` and
 `seed_in_dependency_order` take on the worker side; a change to one belongs in the other.
@@ -39,6 +44,10 @@ MANIFEST_PATH = "/weave/env/manifest.json"
 # Where the worker installs this file in the sandbox.
 INSTALL_PATH = "/usr/local/bin/weave-env"
 MANIFEST_VERSION = 1
+# `_tail`, `UP_TIMEOUT` and `LOG_TAIL_LINES` repeat names in `environment.py` on purpose: this file is
+# uploaded to the sandbox as a standalone script and cannot import the package. `_tail` and `UP_TIMEOUT`
+# must stay equal to theirs (a change belongs in both); `LOG_TAIL_LINES` is this command's own default
+# for `logs`, not the 20 lines `environment.py` puts in a bring-up failure.
 LOG_TAIL_LINES = 200
 UP_TIMEOUT = 1800.0
 DOWN_TIMEOUT = 600.0
@@ -209,7 +218,6 @@ class _Weave:
             return
         self.shell(f"docker network inspect {shlex.quote(self.network)} >/dev/null 2>&1 || "
                    f"docker network create {shlex.quote(self.network)}")
-        started = self.clock()
         create = self.with_secrets(self.compose(entry, "up", "--no-start", "--build"), entry, values)
         code, out = self.shell(create, timeout=UP_TIMEOUT)
         if code != 0:
@@ -231,9 +239,11 @@ class _Weave:
         if code != 0:
             raise self.fail(entry, "its services did not start", out, values)
         self.name_in_sandbox(entry)
+        # A readiness `timeout` is seconds after `up` has returned: pulling and building is not part of it.
+        up_returned = self.clock()
         for service in entry["services"]:
             check = entry["readiness"][service]
-            deadline = started + check["timeout"]
+            deadline = up_returned + check["timeout"]
             while not self.check(entry, service):
                 if self.clock() >= deadline:
                     _, logs = self.shell(self.compose(entry, "logs", "--no-color", "--tail", "20", service))
@@ -289,6 +299,9 @@ class _Weave:
         entry = self.entry(repo)
         self.own_services(entry)
         values = self.need_secrets(entry)
+        # The agent's working copy where the Repo has one (every Repo the Story touches), even if the
+        # Environment first came up from a Task branch checkout; else where it runs from.
+        entry = {**entry, "recipe_file": entry.get("working_copy_recipe_file") or entry["recipe_file"]}
         self.say(f"Rebuilding Repo {repo!r} from {entry['recipe_file']} (its data is kept)")
         self.up(entry, values)
         self.say(f"Repo {repo!r} rebuilt; every service is ready and its data is as it was")
