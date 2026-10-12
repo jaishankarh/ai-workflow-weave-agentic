@@ -78,6 +78,13 @@ _Avoid:_ "backend" (names a Repo's own server), "sandbox" (the per-run container
 One folder per Story on the Sandbox host holding a copy of every Repo that Story's Environment needs: each Repo the Story touches at its Integration branch, every other at its Base branch. It is the agent's working copy in every run of that Story, and the Environment runs that Story's software from it, so the running software is always what the agent has just built. Reused by every round of the Story; removed once the Story is merged or abandoned. Never shared between Stories.
 _Avoid:_ "worktree" (the per-Task working folders `implement-spec` makes inside it), "workspace" alone (each agent tool means something different by it), "sandbox" (the agent's own container).
 
+## Branched database
+A database a Run recipe names that the Product provides as one long-lived server with a branch per Story: cut from a shared base the first time the Story's Environment comes up, used by every run of that Story, and dropped once the Story is merged or abandoned. Only for a database kind that can branch. Whether a database is branched or a **Shared database** is set per Product, never in the Run recipe.
+
+## Shared database
+A database a Run recipe names that the Product provides as one long-lived instance used as-is by every Story at once, with no separation between them (e.g. a cache, a graph database, or any database the Product chooses not to branch).
+_Avoid:_ "global database", "common DB".
+
 ## Run image
 A prebuilt image of one service in a Repo's Run recipe, used by every Environment of that Repo so it need not be built each run: an app service with its dependencies installed, or a database with its base data inside. Built by a human from the Base branch whenever they judge it too old; never replaced by a run. An app Run image is reused only while the files it was built from are unchanged in the run's working copy; source code is never one of them. A service the Run recipe marks as rebuilt every run (e.g. a frontend served from its production build) is always built in the run, using its Run image only to build faster. A Repo without Run images still runs, more slowly.
 _Avoid:_ "base image" (sounds like the Base branch, and like a Dockerfile's FROM image).
