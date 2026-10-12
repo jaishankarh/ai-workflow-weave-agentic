@@ -22,3 +22,5 @@ This is explicitly temporary. The Run recipe contract, the Environment MCP serve
 - Spec 2b (Run images, ADR 0011) has nothing to prebuild under this ADR — there is no container to rebuild from — so it now depends on Spec 2c, not on Spec 2 as rewritten.
 
 _Amended by [ADR 0013](0013-runs-happen-inside-one-long-lived-product-agent-server.md):_ a Story's backend no longer runs as a plain host process from a host-level worktree; it runs inside the Product agent server from the Story workspace. The Dolt/Doltgres server per Product and one branch per Story stand; the shared base is only a starting point (the Repo's migrate and seed run against the Story's branch at every bring-up) and a Story's branch is dropped, never merged back.
+
+_Amended by [ADR 0014](0014-run-recipes-declare-repo-services-and-named-variables-not-compose-services.md):_ the Run recipe is a workflow-owned `.weave/run.yaml` listing Repo services as commands, not a compose file; databases and sibling Repo services reach it through variables the recipe names.
