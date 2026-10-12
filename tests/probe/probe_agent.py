@@ -356,6 +356,219 @@ def report_actions(ctx: dict[str, Any]) -> Any:
     return ctx.get("actions", [])
 
 
+def _docker(*args: str, timeout: float = 240) -> subprocess.CompletedProcess:
+    return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+
+
+def report_container(ctx: dict[str, Any]) -> Any:
+    """Start a container inside the sandbox's own Docker engine, stop it, and say what happened.
+
+    Script key ``run_container``: ``{"image": ..., "leave_running": bool}``. One container prints a
+    line; another is started with ``sleep`` and stopped (unless ``leave_running``).
+    """
+    spec = ctx["script"].get("run_container")
+    if not spec:
+        return None
+    image = spec["image"]
+    result: dict[str, Any] = {"image": image, "started": False, "stopped": False}
+    try:
+        ran = _docker("run", "--rm", image, "echo", "hello from inside the sandbox")
+        result["output"] = ran.stdout
+        if ran.returncode != 0:
+            result["error"] = ran.stderr.strip()[-500:]
+            return result
+        sleeper = _docker("run", "-d", image, "sleep", "300")
+        if sleeper.returncode != 0:
+            result["error"] = sleeper.stderr.strip()[-500:]
+            return result
+        cid = sleeper.stdout.strip()
+        result["started"] = _docker("inspect", "-f", "{{.State.Running}}", cid).stdout.strip() == "true"
+        if spec.get("leave_running"):
+            return result
+        _docker("stop", "-t", "1", cid)
+        result["stopped"] = _docker("inspect", "-f", "{{.State.Running}}", cid).stdout.strip() == "false"
+        _docker("rm", "-f", cid)
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {e}"
+    return result
+
+
+def report_docker_socket_mounts(ctx: dict[str, Any]) -> Any:
+    """Mounts of a docker.sock into this sandbox from the Sandbox host. The nested engine's own
+    socket is a file it creates, not a mount, so a healthy sandbox reports none."""
+    return [line for line in Path("/proc/self/mountinfo").read_text().splitlines() if "docker.sock" in line]
+
+
+def _service_container(repo: str, service: str) -> str | None:
+    """The id of the Environment container for `service` of `repo` (a Compose project named for the Repo)."""
+    out = _docker(
+        "ps", "-q",
+        "--filter", f"label=com.docker.compose.project={repo}",
+        "--filter", f"label=com.docker.compose.service={service}",
+    ).stdout.split()
+    return out[0] if out else None
+
+
+def report_environment(ctx: dict[str, Any]) -> Any:
+    """What the Environment looks like from inside the sandbox (script keys, all optional):
+
+    ``reach``: ``[{"repo", "service", "port", "path"}]``  HTTP GET the service through its address
+        on the Environment network (resolved to the container's IP on that network, as the sandbox's
+        own resolver does not know ``<service>.<repo>``), with no retry.
+    ``exec_in_service``: ``[{"repo", "service", "command"}]``  run a shell command in a service's container.
+    ``resolve``: ``["<service>.<repo>", ...]``  what the sandbox's own resolver answers for each name.
+    ``list_containers``: true  every container in the sandbox's own engine, running or not.
+    """
+    from urllib.request import urlopen
+
+    script = ctx["script"]
+    out: dict[str, Any] = {}
+    if reaches := script.get("reach"):
+        results = []
+        for spec in reaches:
+            item: dict[str, Any] = dict(spec)
+            try:
+                cid = _service_container(spec["repo"], spec["service"])
+                if cid is None:
+                    item["error"] = "no such service container"
+                else:
+                    net = '(index .NetworkSettings.Networks "weave-env")'
+                    ip = _docker("inspect", "-f", "{{" + net + ".IPAddress}}", cid).stdout.strip()
+                    aliases = _docker("inspect", "-f", "{{" + net + ".Aliases}}", cid).stdout
+                    item["alias_ok"] = f"{spec['service']}.{spec['repo']}" in aliases
+                    # Compose's own bare-name alias would clash across Repos (#50).
+                    item["bare_alias"] = spec["service"] in aliases.strip("[]").split()
+                    with urlopen(f"http://{ip}:{spec['port']}{spec.get('path', '/')}", timeout=5) as r:
+                        item["status"], item["body"] = r.status, r.read().decode()[:500]
+            except Exception as e:
+                item["error"] = f"{type(e).__name__}: {e}"
+            results.append(item)
+        out["reach"] = results
+    if execs := script.get("exec_in_service"):
+        results = []
+        for spec in execs:
+            item = dict(spec)
+            try:
+                cid = _service_container(spec["repo"], spec["service"])
+                r = _docker("exec", cid, "sh", "-c", spec["command"])
+                item["exit"], item["output"] = r.returncode, (r.stdout + r.stderr)[-1000:]
+            except Exception as e:
+                item["error"] = f"{type(e).__name__}: {e}"
+            results.append(item)
+        out["exec"] = results
+    if names := script.get("resolve"):
+        # The sandbox's own resolver (the agent's shell), for `<service>.<repo>` names.
+        import socket
+
+        out["resolve"] = {}
+        for name in names:
+            try:
+                out["resolve"][name] = socket.gethostbyname(name)
+            except OSError as e:
+                out["resolve"][name] = f"error: {e}"
+    if script.get("list_containers"):
+        r = _docker("ps", "-a", "--format", "{{.Names}}")
+        out["containers"] = r.stdout.split() if r.returncode == 0 else {"error": r.stderr.strip()[-300:]}
+    return out or None
+
+
+def report_weave_env(ctx: dict[str, Any]) -> Any:
+    """Run the agent's `weave-env` command as the script asks (``weave_env``: a list run in order,
+    each an argument list, or ``{"exec": {"repo", "service", "command"}}`` to change a service's
+    data in between) and say what each did: ``[{"args", "exit", "output"}]``. All of this happens
+    before the ``environment`` report looks at the Environment."""
+    results = []
+    for args in ctx["script"].get("weave_env") or []:
+        item: dict[str, Any] = {"args": args}
+        try:
+            if isinstance(args, dict):
+                spec = args["exec"]
+                r = _docker("exec", _service_container(spec["repo"], spec["service"]), "sh", "-c", spec["command"])
+            else:
+                r = subprocess.run(["weave-env", *args], capture_output=True, text=True, timeout=1800)
+            item["exit"], item["output"] = r.returncode, (r.stdout + r.stderr)[-3000:]
+        except Exception as e:
+            item["error"] = f"{type(e).__name__}: {e}"
+        results.append(item)
+    return results or None
+
+def _user_mcp_servers() -> dict[str, Any]:
+    """The MCP servers Claude Code would load: the managed configuration's (`mcpServers` in
+    /etc/claude-code/managed-mcp.json), which since #56 holds the only ones it loads. The location
+    can be overridden with WEAVE_MANAGED_MCP, for testing the probe outside a sandbox."""
+    path = Path(os.environ.get("WEAVE_MANAGED_MCP") or "/etc/claude-code/managed-mcp.json")
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text()).get("mcpServers") or {}
+
+
+async def _mcp_session(entry: dict[str, Any], work: Callable[[Any], Any]) -> Any:
+    """Start one configured stdio server as Claude Code does (its command, arguments and environment)
+    and run `work(session)` against it."""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    params = StdioServerParameters(command=entry["command"], args=entry.get("args", []), env=entry.get("env"))
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            return await work(session)
+
+
+def _in_own_loop(coro: Any) -> Any:
+    """Run a coroutine to the end from inside the probe's running event loop (in a thread of its own)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+def report_mcp(ctx: dict[str, Any]) -> Any:
+    """The agent's MCP servers, as its user-level configuration has them (script key ``mcp``, optional):
+
+    Always ``configured``: ``{name: {"command", "args", "env_names"}}`` (never an environment value).
+    ``{"tools": true}``  adds ``tools``: ``{name: [tool names]}``, asking each server.
+    ``{"calls": [{"server", "tool", "arguments"}]}``  adds ``calls``: the same dicts with ``ok`` and
+        ``text`` (the tool's text output) or ``error``. A failure is reported, never raised.
+    """
+    servers = _user_mcp_servers()
+    out: dict[str, Any] = {
+        "configured": {
+            name: {"command": e.get("command"), "args": e.get("args", []), "env_names": sorted(e.get("env") or {})}
+            for name, e in servers.items()
+        }
+    }
+    spec = ctx["script"].get("mcp") or {}
+    if spec.get("tools"):
+        out["tools"] = {}
+        for name, entry in servers.items():
+            try:
+                listed = _in_own_loop(_mcp_session(entry, lambda s: s.list_tools()))
+                out["tools"][name] = [t.name for t in listed.tools]
+            except BaseException as e:  # noqa: BLE001 - reported, not raised
+                out["tools"][name] = {"error": f"{type(e).__name__}: {e}"}
+    if calls := spec.get("calls"):
+        out["calls"] = []
+        for call in calls:
+            item: dict[str, Any] = dict(call)
+            try:
+                if call["server"] not in servers:
+                    raise LookupError(f"server {call['server']!r} is not configured")
+                result = _in_own_loop(_mcp_session(
+                    servers[call["server"]], lambda s, c=call: s.call_tool(c["tool"], c.get("arguments") or {})
+                ))
+                item["text"] = "".join(getattr(part, "text", "") for part in result.content)
+                item["ok"] = not result.isError
+                if result.isError:
+                    item["error"] = item["text"]
+            except BaseException as e:  # noqa: BLE001
+                item["ok"], item["error"] = False, f"{type(e).__name__}: {e}"
+                if isinstance(e, LookupError):
+                    item["error"] = str(e)
+            out["calls"].append(item)
+    return out
+
+
 REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "earlier_run_markers": report_earlier_run,
     "env_names": report_env_names,
@@ -372,6 +585,11 @@ REPORTERS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "git_credentials": report_git_credentials,
     "actions": report_actions,
     "always_on": report_always_on,
+    "container": report_container,
+    "docker_socket_mounts": report_docker_socket_mounts,
+    "weave_env": report_weave_env,  # before "environment": what that sees is after these commands
+    "environment": report_environment,
+    "mcp": report_mcp,
 }
 
 

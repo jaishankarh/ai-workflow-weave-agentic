@@ -34,6 +34,13 @@ class RunRequest:
     repos: list[RepoTarget]
     skill: str
     inputs: RunInputs
+    # The Repo whose Task the agent is working on, among `repos` (default: the first). Its working
+    # copy is what its Environment runs from; any other Repo in `repos` runs from its Task branch.
+    working_on: str | None = None
+
+    @property
+    def working_repo(self) -> str:
+        return self.working_on or self.repos[0].name
 
 
 class Outcome(str, enum.Enum):
@@ -44,6 +51,9 @@ class Outcome(str, enum.Enum):
     AGENT_GAVE_UP = "agent-gave-up"
     QUOTA_EXHAUSTED = "quota-exhausted"
     NEEDS_SETUP = "needs-setup"
+    # The Environment came up with every Repo at its Base branch but not with the run's branches (#51):
+    # the Story broke it. A Dispatcher treats it like red Checks; `reason` carries the logs.
+    ENVIRONMENT_BROKEN = "environment-broken"
 
 
 class RunState(str, enum.Enum):
@@ -144,6 +154,35 @@ class RunRecord:
     # (where each file was read from).
     always_on_file: str | None = None
     coding_standards: dict[str, list[str]] | None = None
+    # The Environment (#49): each service started from a Repo's Run recipe with when it passed its
+    # readiness check ({"repo", "service", "address", "ready_at", "seconds_to_ready"}), and where
+    # each service's log was saved outside the sandbox ({"<repo>/<service>": path}). None: the
+    # run had no Environment.
+    environment_services: list[dict] | None = None
+    environment_logs: dict[str, str] | None = None
+    # Several Repos (#50): every Repo in the Environment and what it ran from ({"repo", "source":
+    # "working copy" | "Task branch" | "Base branch", "branch", "touched"}), dependencies first.
+    environment_repos: list[dict] | None = None
+    # Seeding (#53): each Repo's seed command that ran, dependencies first ({"repo", "service",
+    # "command", "seeded_at", "seconds"}); a Repo with no seed is absent. None: nothing was seeded.
+    environment_seeds: list[dict] | None = None
+    # The Test secrets given to the run (#52): the names each Repo's recipe asked for,
+    # {"<repo>": [names]}. Never a value. None: no recipe named any.
+    test_secrets_given: dict[str, list[str]] | None = None
+    # Environment MCP servers (#55): those started for the run ({"name", "repo", "service", "kind",
+    # "address", "server"}; never a credential) and the named databases that got none, with the
+    # reason ({"repo", "service", "kind", "reason"}). None: no recipe named a database.
+    environment_mcp_servers: list[dict] | None = None
+    environment_mcp_omitted: list[dict] | None = None
+    # External MCP servers (#56) started for the run, by name only ({"name", "repo", "declared",
+    # "transport", "secrets": [Test secret names]}; never a value, command or url). None: none declared.
+    external_mcp_servers: list[dict] | None = None
+    # The Repos whose own committed MCP config (`.mcp.json`) the run ignored (#56). None: no Repo had one.
+    repo_mcp_config_ignored: list[str] | None = None
+    # How the Environment was brought up (#51): "branches" (some Repo ran from the Story's work)
+    # and/or "base" (every Repo at its Base branch), in order. ["branches", "base"] is the one retry.
+    # None: the run had no Environment.
+    environment_bring_up_attempts: list[str] | None = None
 
     def status(self) -> RunStatus:
         return RunStatus(self.run_id, self.state, self.outcome, self.reason, self.tickets_done)

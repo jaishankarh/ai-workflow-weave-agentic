@@ -47,7 +47,10 @@ codes; the table is `AgentProfile.error_kinds` (default: claude-agent-acp's).
 | Agent finished with `RUN-OUTCOME: gave-up: <why>` or no marker, or OpenHands stopped it as stuck with no error | `agent-gave-up` |
 | Agent error `errorKind` `authentication_failed`, or ACP code -32000 (claude-agent-acp's "Authentication required", e.g. for a rejected Claude Code token) | `needs-setup` |
 | Agent error `errorKind` `rate_limit` / `billing_error` | `quota-exhausted` |
-| Any other agent error, a sandbox that fails to start or dies mid-run, unreachable Central skills | `infra-failure` |
+| Any other agent error, a sandbox that fails to start or dies mid-run, unreachable Central skills, a Sandbox host without the `sandbox_runtime` a run needs for its Environment (checked before anything starts) | `infra-failure` |
+| A Repo's Run recipe that cannot be read, or whose services do not start or become ready, with every Repo at its Base branch (before any agent starts; see "Environments") | `needs-setup` |
+| The Environment fails to come up because of the host or network (an unreachable image registry, the Docker daemon not answering) | `infra-failure` |
+| The Environment fails to come up with the Story's branches in place but comes up with every Repo at its Base branch | `environment-broken` |
 
 `ACP_PROMPT_MAX_RETRIES=0` is set in every sandbox, so a rejected credential
 surfaces in seconds; infrastructure retries are the caller's. When the error
@@ -193,10 +196,277 @@ and, for larger Repos, a persistent mirror per Repo instead of a fresh clone
 per run. The gateway must listen only where sandboxes can reach it (the bridge
 gateway, not `0.0.0.0`).
 
+### Sandboxes on sysbox
+
+Only a run with a touched Repo that has a Run recipe (below) gets a sandbox on sysbox: such a
+sandbox starts with `docker run --runtime <WorkerSettings.sandbox_runtime>` (default
+`sysbox-runc`; never `--privileged`, never the host's Docker socket; ADR 0004), and the image's
+entrypoint then starts a Docker engine inside it (`WEAVE_START_DOCKERD=1`), so the Repo's software
+runs in containers inside the sandbox. Every other run stays on the host's default runtime with no
+engine. A Sandbox host whose Docker does not list the runtime fails the run as `infra-failure`
+naming it, before a sandbox is started; so does a worker whose `sandbox_runtime` is `None` when a
+run needs an Environment. Teardown waits until the sandbox is gone from the Sandbox host (polling
+`docker inspect`, up to 60 s) before the run is reported ended; if it is not gone, that is noted in
+`run.log`. Tests that need sysbox are skipped on a host without it.
+
+### Environments: a Repo's Run recipe
+
+A Repo's Run recipe is one committed compose file, `.weave/compose.yaml`, kept apart from any
+developer `docker-compose.yml` (which is never used: the worker names the recipe with an explicit
+`-f`). The workflow's own fields sit in one top-level `x-weave:` block, which Compose ignores, so the
+file also runs by hand with `docker compose -f .weave/compose.yaml up`:
+
+```yaml
+services:
+  web:
+    image: python:3.12-slim
+    command: python -m http.server 8000
+x-weave:
+  readiness:            # a check for every service, run inside its container; exit 0 = ready
+    web:
+      command: python -c "import urllib.request as u; u.urlopen('http://localhost:8000')"
+      timeout: 60       # seconds after start (default 60)
+      interval: 1       # seconds between attempts (default 1)
+```
+
+`command` is a string (run with `sh -c`) or a list (run as is). A recipe may have no services. It
+may also name the Repos it needs: `x-weave: {depends_on: [svc]}`. The other `x-weave` fields of
+`secrets` (see "Test secrets"), `seed`, `databases` (see "Environment MCP servers") and `external_mcp`
+(see "External MCP servers") are read too. `seed`:
+
+```yaml
+x-weave:
+  seed:
+    service: db                          # one of the recipe's own services
+    command: psql -U app -f /seed.sql    # string (sh -c) or list; timeout: seconds (default 300)
+```
+
+Every Environment starts from empty databases (tracked Seed scripts are Spec 2b, ADR 0011); schema
+creation is the recipe's or the app's job. Once every Repo's services are ready, each seed runs once,
+Repos in dependency order, so a Repo is seeded after the Repos it depends on and its seed command
+sees their data. It runs with `docker compose -p <repo> exec` in the named service of that Repo's
+own project, with only the Test secrets that recipe names (also handed to the command with `-e`),
+so a Repo's seed has no credential for a sibling's databases. This is placement and credential
+scoping, not a firewall: the network is open, so a recipe that hard-codes a sibling's credentials
+could still reach it. A failing seed ends the run before any agent starts, and is classified like a service that
+would not start (see "Environments"): `infra-failure` for a host or network fault, else retried once
+with every Repo at its Base branch (the first attempt is taken down with its volumes, so no seeded
+state carries over; seeding runs again on the retry) and then `needs-setup`, or `environment-broken`
+if Base seeds fine. The reason names the Repo, service and output, secret values redacted. A Repo with no seed omits the field. The run
+record lists `environment_seeds` (Repo, service, command, `seeded_at`, `seconds`).
+
+Between staging the agent's files and starting the agent, the worker brings each such Repo's
+recipe up inside the sandbox as its own Compose project (`-p <repo>`), on a shared network
+`weave-env` where each service has the alias `<service>.<repo>` (and no other: services are created,
+joined to the network with `docker network connect --alias`, then started, because Compose would
+also give each one its bare name there, which two Repos with a `db` would share), and waits until
+every service has passed its readiness check. The same names are added to the sandbox's
+`/etc/hosts`, so the agent's shell resolves them too.
+
+Several Repos share one Environment. Every touched Repo with a recipe is brought up, and so is
+every Repo named in a `depends_on` (transitively), dependencies first; a `depends_on` cycle or a
+dependency without a recipe is refused (`needs-setup`). Each Repo runs from: the agent's working copy
+for the Repo being worked on (`RunRequest.working_on`, default the first of `repos`), its Task branch
+(Integration branch) for another Repo in `repos`, and its Base branch for a Repo the run does not
+touch, so an Environment never holds another Story's unmerged work. The last two run from a
+checkout under `/weave/env/src/<repo>` that the agent does not edit. A service that does not start or does not
+become ready in time ends the run before any agent starts (no Subscription use; the lease is still
+released), and which outcome it reports depends on why:
+
+- The engine's output blames the host or network (an unreachable registry or daemon, a DNS, TLS or
+  connection failure, a registry that is down or rate-limiting): `infra-failure`, for the Dispatcher to
+  retry. Never retried here. (A pull that is refused or an image that does not exist is the recipe's
+  fault, not the host's.)
+- Otherwise, if some Repo runs from the Story's work (a Task branch found, or a working copy that is
+  past its Base branch), the whole Environment is taken down and brought up once more with every Repo
+  at its Base branch. Failing there too is `needs-setup`, with the reason of that second failure
+  (Repo, service, last log lines). Coming up there means the Story broke it: `environment-broken`,
+  whose reason carries the first failure's log lines; a Dispatcher treats it like red Checks.
+- A run in which every Repo already starts at its Base branch (a first implement run) reports a
+  non-host failure as `needs-setup` and does not retry. A healthy bring-up never retries.
+
+Only a service that does not start or become ready is retried. A recipe that cannot be read, a
+missing Test secret and a `depends_on` problem are `needs-setup` at once.
+
+The containers have open internet access, and go with the sandbox: nothing is shared between runs.
+
+The run record lists `environment_bring_up_attempts` (`["branches"]`, `["base"]` for a run that
+started every Repo at Base, or `["branches", "base"]` after the retry) and `environment_repos` (each Repo in the Environment, with `source`: working
+copy, Task branch or Base branch, its `branch`, and whether the run `touched` it),
+`environment_services` (Repo, service, address, `ready_at`, `seconds_to_ready`) and `environment_logs` (each service's log, saved to
+`<runs_dir>/<run id>/environment/<repo>/<service>.log` before the sandbox is removed; the logs of a
+failed first attempt, taken down before the retry, are kept as `with-branches/<repo>/<service>` under
+`environment/`). `status` and the record report `environment-broken` as an outcome of its own.
+
+#### The `weave-env` command
+
+The agent manages its Environment only through `weave-env`, installed in every run's sandbox
+(`/usr/local/bin/weave-env`, a standard-library Python program, `weave_env.py`); it needs no Docker
+commands of its own:
+
+- `weave-env status` lists every service of every Repo, its address, its state and whether it is ready.
+- `weave-env logs <repo> [service]` shows the recent output (last 200 lines) of one service, or of all the Repo's.
+- `weave-env rebuild <repo>` rebuilds that Repo's project from its working copy (`up --build`), re-joins
+  the Environment network and waits for readiness again; volumes are kept, so its data is as it was, and
+  nothing is seeded again.
+- `weave-env reset` removes every project with its volumes (`down -v`), brings them up fresh in
+  dependency order and seeds again in that order.
+
+An unknown Repo or service, and a Repo that runs no services of its own, get a plain message naming
+what there is (exit status 1); a run with no Environment gets "This run has no Environment" rather
+than a crash. The worker tells the command what the Environment is by writing a manifest,
+`/weave/env/manifest.json`, once the Environment is up and seeded: each Repo in dependency order with
+its placement, recipe, services, readiness checks, seed and the *names* of its Test secrets. Secret
+values are never in it or in the agent's environment: when `rebuild` or `reset` has to recreate a
+container it reads the values back from the Repo's own containers and hands them on exactly as bring-up
+does (only the secrets the recipe names), and its output is redacted of them.
+
+#### Environment MCP servers
+
+The agent can read and change the data its code produced through MCP, without writing connection
+code. A recipe names its databases, and a Product says which kinds it enables:
+
+```yaml
+# .weave/compose.yaml
+x-weave:
+  databases:
+    - service: db                 # one of the recipe's own services
+      kind: postgres              # postgres | neo4j | mysql | redis
+      port: 5432                  # optional; the kind's default
+      credentials:                # the throwaway database's own, so in the committed recipe (not Test secrets)
+        user: {env: POSTGRES_USER}        # a value, or `env: NAME` read from the service's own `environment:`
+        password: app-pw
+        database: chat                    # Neo4j: optional, default `neo4j`
+# config/products/<product>.yaml
+database_mcp_kinds: [postgres, neo4j]     # kinds this Product enables; default none
+```
+
+Only a database a recipe names is considered (nothing is guessed from an image). Each one of an
+enabled kind gets one read-write MCP server for the run, started by the agent's Claude Code from its
+managed MCP configuration (`/etc/claude-code/managed-mcp.json`, written by `stage_mcp_servers` in
+`sandbox.py` after seeding and before the agent starts, see "External MCP servers" for why it is not
+`~/.claude.json`; never a working copy's `.mcp.json`), named
+`<repo>-<service>` and given one host only: the database's address `<service>.<repo>` in that run's own
+Environment. Servers are processes in the run's sandbox and go with it. A named database of a kind the
+Product has not enabled gets no server, and neither does Redis (which is in the Environment only); the
+run's `run.log` has a line for each, and the run record lists `environment_mcp_servers` (name, Repo,
+service, kind, address, pinned server) and `environment_mcp_omitted` (Repo, service, kind, reason). The record
+and the log never hold a credential. The Repo's own skills load as before. The built-in catalog
+(`agent_worker/mcp.py`) pins:
+
+| kind | server (PyPI) | settings it is given |
+| --- | --- | --- |
+| postgres | `postgres-mcp` 0.3.0 (`--access-mode=unrestricted`) | `DATABASE_URI` |
+| neo4j | `mcp-neo4j-cypher` 0.6.0 (no `--read-only`) | `NEO4J_URI`, `_USERNAME`, `_PASSWORD`, `_DATABASE` |
+| mysql | `mysql-mcp-server` 0.4.4 | `MYSQL_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_DATABASE` |
+
+They are installed when the sandbox image is built, each in its own virtualenv `/opt/weave-mcp/<kind>`,
+so a run needs no network to start one. `postgres-mcp` also pins `mcp[cli]==1.30.0`: its own
+`mcp>=1.5` now resolves to mcp 2.x, where it fails at import.
+
+The servers keep working across `weave-env rebuild` and `weave-env reset`: both give the recreated
+containers the same Environment network and the same `<service>.<repo>` alias a server is configured
+with, and the credentials are the committed recipe's, which neither command changes. Only the server's
+open connections end when the database container is replaced, so a server may need a fresh call or two to reconnect (a `reset`
+also empties the data and seeds it again, which the server then sees).
+
+#### External MCP servers, and a Repo's own MCP config (#56)
+
+Anything beyond the Environment's own databases is declared in the recipe:
+
+```yaml
+x-weave:
+  external_mcp:
+    - name: pay                      # the agent sees it as `<repo>-pay`
+      command: npx                   # a stdio server: started inside the run's own sandbox
+      args: [-y, pay-mcp@1.2.3]      # pin versions; nothing is expanded from the environment (`${` is refused)
+      secrets: [PAY_TEST_KEY]        # Test secrets it uses, by name; each is an environment variable of that name
+    - name: docs
+      url: https://mcp.example.test/mcp          # or a remote server
+      headers: {Authorization: "Bearer ${DOCS_TOKEN}"}   # `${NAME}` of a listed secret, the only expansion
+      secrets: [DOCS_TOKEN]
+```
+
+*Each run has its own copy.* A stdio server is a process the agent's Claude Code starts inside that
+run's sandbox from configuration staged only there; it goes with the sandbox and no other run can
+reach it. (A `url` server is somebody else's service, not a copy; it is for test accounts and
+sandboxes only because only Test secrets can reach it.)
+
+*Only the Test secrets it names.* A stdio server is started through `/bin/sh -c 'exec env -i
+PATH=... HOME=... NAME=... "$@"'`, so it sees exactly `PATH`, `HOME` and its named secrets: Claude Code
+starts a server in its own environment plus the entry's `env`, and the sandbox's environment carries
+the Subscription's credential. A recipe cannot name a Tracker or Code host token variable (`GH_TOKEN`,
+`GITHUB_TOKEN`, ... `CODE_HOST_TOKEN_VARS`) as a secret, a `url` cannot be the push gateway, and before
+anything is staged the run checks that no server's configuration holds the push gateway's run token,
+the gateway's address, or any Code host token the worker or the Subscription has: otherwise the run
+ends as `needs-setup`, naming the server and no value. Test secrets reach the managed MCP file
+(mode 0600, in the run's sandbox only) in the clear, as the databases' credentials do. Not covered:
+the run token also sits in the working copies' git remote URLs (ADR 0009), which a stdio server
+running as root in the sandbox could read from disk; the server is the Repo's declared choice.
+
+*Missing secret.* `start` checks a touched Repo's External MCP secrets with the services' (`NeedsSetup`
+naming the Repo and the secret, before any sandbox); a dependency Repo's are read before any Repo's
+services start and end the run as `needs-setup` too. A server name already taken (`<repo>-<name>`
+against another Repo's or an Environment MCP server) is `needs-setup` as well. The record lists the
+servers started by name (`external_mcp_servers`: name, Repo, declared name, transport, secret names;
+never a value, command or url) and `run.log` has a line each.
+
+*A Repo's own MCP config is ignored.* Headless Claude Code (`claude -p`, the Agent SDK, so the
+sandbox's `claude-agent-acp`) loads a project `.mcp.json` **without asking**, so leaving it alone is not
+enough. Options weighed against Claude Code's current behaviour:
+
+| option | outcome |
+| --- | --- |
+| `enableAllProjectMcpServers: false` in settings | does not stop it: the server is still loaded in `-p` (checked) |
+| `disabledMcpjsonServers: [names]` | works for names read from the file, but it is name-based: a Repo adding a server later, or other project-scope sources (plugins enabled by the Repo's settings), are not covered |
+| delete or rename `.mcp.json` in the working copy | shows up in the diff the agent pushes; fragile |
+| **`/etc/claude-code/managed-mcp.json`** | **chosen**: once it exists, only its servers load (Repo `.mcp.json`, user-level, plugin servers and `--mcp-config` servers are ignored; `--mcp-config` is ignored with a warning, not fatal) |
+
+So at the start of every run, before the agent, `stage_mcp_servers` writes the managed file (empty);
+Environment MCP servers and External MCP servers are added to it as they start. This replaces #55's
+`~/.claude.json` staging: user-level servers do not load beside a managed file. Each Repo that
+commits a `.mcp.json` gets a line in `run.log` ("Repo 'x' commits an MCP config (.mcp.json) that this
+run ignores") and is listed in the record's `repo_mcp_config_ignored`. A Repo's own skills load as
+before. Verified with the real CLI (`claude` 2.1.293; the image pins 2.1.287), not unit-faked:
+`tests/test_external_mcp_servers.py::test_claude_code_loads_a_repos_committed_mcp_config_unless_managed_config_is_staged_and_then_only_ours`
+reads the `mcp_servers` of the headless `init` event with and without the file.
+
+#### Test secrets
+
+A Product's Test secrets (credentials for test accounts and sandboxes of outside services, never
+staging or production) are one file per Product on the Sandbox host, outside every repo:
+`<test_secrets.location>/<product>.yaml`, a flat `NAME: value` mapping (format:
+`config/test-secrets.example.yaml`). `test_secrets.location` in `weave.yaml` (default
+`~/.config/weave/secrets`) sits next to `subscription_store.location`, and the worker is given the
+folder as `WorkerSettings.test_secrets` (`load_configured_secret_store("weave.yaml")`). A human writes
+the file; runs only read it; it never changes per ticket. It must be readable by its owner only
+(`chmod 600`): a file others can read is refused. A Product's lookup opens only its own file.
+
+A recipe names the secrets it needs by name only: `x-weave: {secrets: [KORONA_API_KEY]}`. Each named
+secret reaches every service of that recipe as an environment variable of that name (Compose is told
+the names in the generated override and takes the values from the environment of the `up` command, so
+no file in the sandbox holds a value; the values go on both the `up --no-start` and the final `up -d`
+commands of the Repo's bring-up, and on nothing else). Nothing else from the file reaches any service, and no secret
+reaches the agent's sandbox environment. A throwaway database's own credentials live in the recipe,
+not here.
+
+A Repo the run does not touch but a recipe depends on gets its secrets the same way, read when its
+recipe is loaded (it ends the run as `needs-setup` if the Product lacks one).
+
+A named secret the Product lacks (or no file, or a file with the wrong mode) makes `start` return
+`NeedsSetup` naming the Repo and the secret, before any lease or sandbox. The file is read again when
+the run begins, and a secret that has gone since then ends the run as `needs-setup` before its
+sandbox starts. The run record lists the names given per Repo (`test_secrets_given`) and `run.log`
+says so; a value is never written to the record, `run.log`, the saved service logs or the event log
+(values echoed by a failing service are replaced with `[redacted Test secret]`).
+
 ### Images
 
-- `sandbox/Dockerfile`: the base sandbox image (agent-server, git, Python).
-  Its base image is the build ARG `BASE_IMAGE` (default `ubuntu:24.04`).
+- `sandbox/Dockerfile`: the base sandbox image (agent-server, git, Python, and a Docker engine
+  with Compose that starts only in a sandbox run on sysbox; see "Sandboxes on sysbox").
+  Its base image is the build ARG `BASE_IMAGE` (default `ubuntu:24.04`). It also holds the
+  catalog's pinned database MCP servers under `/opt/weave-mcp/<kind>` (build ARGs `*_MCP_VERSION`;
+  see "Environment MCP servers"); a base image needs Python 3.12 or later for them.
 - `sandbox/claude-code/Dockerfile`: the Claude Code Agent profile's image, on
   top of the sandbox image (build ARG `SANDBOX_IMAGE`). It pins Node.js
   22.22.0, the Claude Code CLI (`@anthropic-ai/claude-code` 2.1.287) and its ACP

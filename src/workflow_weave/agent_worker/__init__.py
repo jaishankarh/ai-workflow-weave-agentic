@@ -17,6 +17,12 @@ from .config import (
     claude_code_profile,
     load_product_config,
 )
+from .secret_store import (
+    ProductSecrets,
+    SecretsError,
+    SecretStore,
+    load_configured_secret_store,
+)
 from .subscriptions import (
     Lease,
     Subscription,
@@ -49,6 +55,7 @@ __all__ = [
     "PROTECTED_SKILLS",
     "ProductConfig",
     "ProductConfigError",
+    "ProductSecrets",
     "RepoConfig",
     "RepoTarget",
     "RunInputs",
@@ -56,6 +63,8 @@ __all__ = [
     "RunRequest",
     "RunState",
     "RunStatus",
+    "SecretStore",
+    "SecretsError",
     "Started",
     "StartResult",
     "Subscription",
@@ -64,6 +73,7 @@ __all__ = [
     "WorkerSettings",
     "claude_code_profile",
     "load_product_config",
+    "load_configured_secret_store",
     "load_configured_subscription_store",
     "load_subscription_store",
 ]

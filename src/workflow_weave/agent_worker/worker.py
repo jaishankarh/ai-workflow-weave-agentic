@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import shlex
 import subprocess
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Sequence, TypeVar
 
 from openhands.sdk import Conversation
 from openhands.sdk.agent import ACPAgent
@@ -18,15 +20,25 @@ from openhands.sdk.conversation.response_utils import get_agent_final_response
 from .config import ProductConfig, WorkerSettings
 from . import git
 from .git import GitError
-from .model import NeedsSetup, NoCapacity, Outcome, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
+from .model import NeedsSetup, NoCapacity, Outcome, RepoTarget, RunRecord, RunRequest, RunState, RunStatus, Started, StartResult
 from .outcomes import (
     DONE_MARK, GAVE_UP_MARK, classify_error, classify_final_reply, last_error_detail, with_agent_words,
 )
-from .sandbox import WORKDIR, Sandbox, SandboxError, stage_skills, stage_user_files
+from .environment import (
+    FROM_BASE_BRANCH, FROM_TASK_BRANCH, RECIPE_PATH, Environment, EnvironmentBringUpError, LogsNotSaved, Placement,
+    Recipe, RecipeError, environment_manifest, parse_recipe, resolve_environment, seed_in_dependency_order,
+)
+from .mcp import McpPlanError, plan_environment_servers, plan_external_servers, refuse_forge_credentials
+from .sandbox import (
+    WORKDIR, Sandbox, SandboxError, require_runtime, stage_mcp_servers, stage_skills, stage_user_files,
+    stage_weave_env,
+)
+from .weave_env import MANIFEST_PATH as WEAVE_ENV_MANIFEST
 from . import standards
+from .secret_store import SecretsError, redact
 from .subscriptions import Lease
 from . import local_tickets
-from .push_gateway import GATEWAY_HOST, PushGateway, RunRemotes, without_code_host_tokens
+from .push_gateway import CODE_HOST_TOKEN_VARS, GATEWAY_HOST, PushGateway, RunRemotes, without_code_host_tokens
 from .staging import StagingError, StagingPlan, central_skills_version, read_repo_skills
 from .staging import plan as plan_skills
 from workflow_weave.central_skills import CentralSkills
@@ -34,6 +46,8 @@ from workflow_weave.central_skills import CentralSkills
 T = TypeVar("T")
 
 TERMINAL = {"finished", "error", "stuck"}
+# Under a run's folder, beside its event log: <repo>/<service>.log for each Environment service.
+ENVIRONMENT_LOGS_DIR = "environment"
 # How often a running run checks that its sandbox is still alive.
 SANDBOX_CHECK_INTERVAL = 5.0
 
@@ -58,6 +72,9 @@ class _Run:
         self.cancel_requested = threading.Event()
         self.done = threading.Event()
         self.thread: threading.Thread | None = None
+        # Each Repo's Test secrets (name -> value) this run was given, kept only to start its
+        # services and to scrub values out of anything written down.
+        self.test_secrets: dict[str, dict[str, str]] = {}
 
 
 class AgentWorker:
@@ -88,6 +105,8 @@ class AgentWorker:
         for repo in request.repos:
             if repo.name not in product.repos:
                 raise ValueError(f"Repo {repo.name!r} is not part of Product {request.product!r}")
+        if request.working_on is not None and request.working_on not in {r.name for r in request.repos}:
+            raise ValueError(f"working_on {request.working_on!r} is not one of the run's Repos")
 
         store = self.settings.subscriptions
         agent = profile.agent_provider
@@ -141,7 +160,89 @@ class AgentWorker:
         )
         if absent:
             return "Coding standards missing: " + "; ".join(absent)
-        return None
+        problem, _ = self._test_secrets(request, product, refs)
+        return problem
+
+    def _test_secrets(
+        self, request: RunRequest, product: ProductConfig, refs: dict[str, str]
+    ) -> tuple[str | None, dict[str, dict[str, str]]]:
+        """The Test secrets this run's Repos need: (what a human must fix or None, Repo -> name -> value).
+
+        Each Repo's Run recipe on its Base branch names its secrets; a run is given those and only
+        those, from its own Product's file. Nothing here starts a sandbox. The Product's file is
+        read only when some recipe names a secret.
+        """
+        named = {
+            t.name: names
+            for t in request.repos
+            # Services' and External MCP servers' alike: a missing one stops the run before it starts.
+            if (names := _recipe_secret_names(t.name, product.repos[t.name].source, refs[t.name]))
+        }
+        # Every recipe the run can bring up must have its secrets: also a Task branch's, and a Repo the
+        # run does not touch but a recipe depends on. Only the first are read here; the others are read
+        # when their recipe is loaded.
+        in_play = self._secrets_in_play(request, product, refs)
+        if not in_play:
+            return None, {}
+        store = self.settings.test_secrets
+        if store is None:
+            repo, names = next(iter(in_play.items()))
+            return (
+                f"Repo {repo!r} names Test secret {names[0]!r} but no Test secrets are configured "
+                f"(`test_secrets.location` in weave.yaml): add {request.product!r}'s Test secrets file",
+                {},
+            )
+        try:
+            have = store.for_product(request.product)
+        except SecretsError as e:
+            repo, names = next(iter(in_play.items()))
+            return f"Repo {repo!r} names Test secret {names[0]!r}: {e}", {}
+        lacking = [f"Repo {repo!r} names Test secret {n!r}" for repo, names in in_play.items() for n in have.missing(names)]
+        if lacking:
+            return (
+                "; ".join(lacking) + f" that Product {request.product!r} does not have: add it to {have.path}",
+                {},
+            )
+        return None, {repo: have.select(names) for repo, names in named.items()}
+
+    def _secrets_in_play(
+        self, request: RunRequest, product: ProductConfig, refs: dict[str, str]
+    ) -> dict[str, tuple[str, ...]]:
+        """Repo -> the Test secrets named by any Run recipe this run may bring up: each touched Repo's
+        recipe on its Base branch and, for a Repo other than the one being worked on, on its Task
+        branch (as the sandbox's clone will have it); and, following `depends_on`, the recipes of the
+        Repos pulled in, at their Base branch. Read from the Sandbox host's clones; no sandbox."""
+        named: dict[str, dict[str, None]] = {}
+        queue: list[tuple[str, str, str]] = []
+        for t in request.repos:
+            source = product.repos[t.name].source
+            queue.append((t.name, source, refs[t.name]))
+            if t.name != request.working_repo:
+                queue.append((t.name, source, f"refs/heads/{t.integration_branch}"))
+        seen: set[tuple[str, str]] = set()
+        while queue:
+            repo, source, ref = queue.pop(0)
+            if (repo, ref) in seen:
+                continue
+            seen.add((repo, ref))
+            recipe = _recipe_at(repo, source, ref)
+            if recipe is None:
+                continue
+            for name in recipe.all_secrets:
+                named.setdefault(repo, {})[name] = None
+            for dependency in recipe.depends_on:
+                if dependency not in product.repos:
+                    continue  # the run reports an unknown Repo when it loads the recipe
+                if dependency in refs:
+                    queue.append((dependency, product.repos[dependency].source, refs[dependency]))
+                    continue
+                base = product.repos[dependency].base_branch
+                try:
+                    where = self._dependency_base_ref(product, dependency, base)
+                except GitError:
+                    where = f"refs/heads/{base}"  # the run itself reports a Code host it cannot reach
+                queue.append((dependency, product.repos[dependency].source, where))
+        return {repo: tuple(names) for repo, names in named.items()}
 
     def _central_location(self) -> Path | None:
         loc = self.settings.central_skills_location
@@ -217,6 +318,7 @@ class AgentWorker:
         sandbox: Sandbox | None = None
         conversation = None
         remotes: RunRemotes | None = None
+        environments: list[Environment] = []
         leftovers: list[str] | None = None
         final: tuple[RunState, Outcome | None, str | None] = (
             RunState.ENDED, Outcome.INFRA_FAILURE, "the run stopped before it could report how it ended",
@@ -224,6 +326,38 @@ class AgentWorker:
         try:
             code_hosts = _code_host_remotes(run.request, product)
             refs = _base_refs(run.request, product, code_hosts, strict=True)
+            # Only a run with a touched Repo that has a Run recipe gets an Environment, and so a
+            # sandbox on sysbox; every other run stays on the default runtime, unchanged.
+            with_recipe = [
+                t.name for t in run.request.repos
+                if _has_recipe_in_place(t, product.repos[t.name].source, refs[t.name], run.request.working_repo)
+            ]
+            # The Test secrets the recipes name, from the Product's own file (the same check `start`
+            # made; repeated because the file may have changed since). Before any sandbox exists.
+            problem, run.test_secrets = self._test_secrets(run.request, product, refs)
+            if problem:
+                raise EnvironmentBringUpError(problem)
+            # Those given to a Repo's services (an External MCP server's are recorded with the server).
+            for_services = {
+                repo: sorted(set(values) & set(_recipe_secret_names(repo, product.repos[repo].source, refs[repo], True)))
+                for repo, values in run.test_secrets.items()
+            }
+            if any(for_services.values()):
+                rec.test_secrets_given = {repo: given for repo, given in for_services.items() if given}
+                self._save(rec)
+                for repo, given in rec.test_secrets_given.items():
+                    self._note(rec, f"Test secrets given to Repo {repo!r}'s services: {', '.join(given)} "
+                                    f"(names only; values are never recorded)")
+            runtime = None
+            if with_recipe:
+                runtime = self.settings.sandbox_runtime
+                if not runtime:
+                    raise SandboxError(
+                        f"Repo {with_recipe[0]!r} has a Run recipe ({RECIPE_PATH}) but this worker has no "
+                        f"sandbox_runtime set, so it cannot give the run an Environment"
+                    )
+                # Before anything is prepared or started: a host without the runtime is an infra-failure.
+                require_runtime(runtime)
             for t in run.request.repos:
                 source = product.repos[t.name].source
                 if remote := code_hosts[t.name]:
@@ -262,6 +396,7 @@ class AgentWorker:
                 # Read-only, so the agent cannot change the originals (ADR 0009).
                 mounts=[(str(originals.resolve()), local_tickets.ORIGINALS_DIR)],
                 extra_hosts=[f"{GATEWAY_HOST}:host-gateway"],
+                runtime=runtime,
             )
             sandbox.sh(local_tickets.MAKE_TRACKER, cwd="/")
             for target in run.request.repos:
@@ -272,10 +407,23 @@ class AgentWorker:
             stage_skills(sandbox, staging)
             # The always-on file and the resolved Coding standards, at user level (ADR 0002).
             user_dir = stage_user_files(sandbox, lambda d: resolved.tarball(d, WORKDIR))
+            stage_weave_env(sandbox)  # the agent's one command for its Environment (#54)
+            # Before the agent exists: the only MCP servers it can load are the ones staged below (#56).
+            self._ignore_repos_mcp_config(run, product, sandbox, refs)
             rec.always_on_file = f"{user_dir}/{standards.ALWAYS_ON_FILE}"
             rec.coding_standards = {r.repo: [f.origin for f in r.files] for r in resolved.repos}
             if run.cancel_requested.is_set():
                 raise _Cancelled
+
+            # The Environment is up and ready before any agent starts (and so before any
+            # Subscription use); a failure here ends the run with its reason.
+            if with_recipe:
+                self._bring_up_environment(run, product, sandbox, refs, environments)
+                # Wired before the agent starts, once the databases are up and seeded.
+                taken = self._start_environment_mcp_servers(run, product, sandbox, environments)
+                self._start_external_mcp_servers(
+                    run, sandbox, environments, taken, self._forge_credentials(run, remotes)
+                )
 
             agent = ACPAgent(acp_command=profile.acp_command, acp_session_mode=profile.acp_session_mode)
             log = _EventLog(rec.event_log)
@@ -291,6 +439,8 @@ class AgentWorker:
             final = (RunState.ENDED, *_classify(status, conversation, profile.error_kinds))
         except _Cancelled:
             final = (RunState.CANCELLED, None, "cancelled")
+        except EnvironmentBringUpError as e:
+            final = (RunState.ENDED, e.outcome, e.reason[:2000])
         except SandboxError as e:
             final = (RunState.ENDED, Outcome.INFRA_FAILURE, f"sandbox failure: {e}"[:2000])
         except Exception as e:  # anything else that broke the run's infrastructure
@@ -299,7 +449,7 @@ class AgentWorker:
             # Every end path releases the lease, saves the record and finishes the run,
             # however teardown goes (a teardown failure is noted in run.log).
             try:
-                leftovers = self._stop(conversation, sandbox, rec)
+                leftovers = self._stop(conversation, sandbox, rec, environments)
                 if remotes is not None:
                     gateway_remotes = remotes
                     self._best_effort(rec, "revoking the run's push token",
@@ -319,6 +469,8 @@ class AgentWorker:
             if leftovers:
                 self._note(rec, f"processes still running after the agent was closed: {leftovers}")
             rec.state, rec.outcome, rec.reason = final
+            if rec.reason:
+                rec.reason = self._scrub(rec, rec.reason)
             rec.ended_at = _now()
             self._save(rec)
         finally:
@@ -345,10 +497,320 @@ class AgentWorker:
                     raise SandboxError(f"{how} mid-run: {sandbox.last_logs(500)}")
                 next_check = time.monotonic() + SANDBOX_CHECK_INTERVAL
 
-    def _stop(self, conversation: Any, sandbox: Sandbox | None, rec: RunRecord) -> list[str] | None:
+    def _bring_up_environment(
+        self, run: _Run, product: ProductConfig, sandbox: Sandbox, refs: dict[str, str],
+        environments: list[Environment],
+    ) -> None:
+        """Bring up the Environment, and when it fails with the Story's branches in place, once more
+        with every Repo at its Base branch (#51). Raises EnvironmentBringUpError with the outcome:
+        `infra-failure` for a host or network fault (no retry), `needs-setup` if it fails at Base too
+        or already started at Base (the reason names the Repo, the service and the last log lines),
+        `environment-broken` if it comes up at Base but not with the branches (a service that will not
+        start, a seed that fails, or a Run recipe the branches broke). A healthy bring-up
+        pays for no retry."""
+        rec = run.record
+        try:
+            placed, branches_in_place = self._place_environment(run, product, sandbox, refs, all_at_base=False)
+        except EnvironmentBringUpError as first:
+            # A Run recipe the Story's branches broke or removed: tried again at Base like a service that fails.
+            if not first.retryable:
+                raise
+            self._note(rec, f"the Environment could not be set up with the run's branches; retrying once with every "
+                            f"Repo at its Base branch: {first.reason}")
+            failed_with_branches = first
+        else:
+            rec.environment_bring_up_attempts = ["branches" if branches_in_place else "base"]
+            try:
+                self._bring_up_placed(run, sandbox, placed, environments)
+                return
+            except EnvironmentBringUpError as first:
+                if not (first.retryable and branches_in_place):
+                    raise
+                self._note(rec, f"the Environment failed with the run's branches; retrying once with every Repo at "
+                                f"its Base branch: {first.reason}")
+                failed_with_branches = first
+                self._abandon_attempt(rec, environments)
+        rec.environment_bring_up_attempts.append("base")
+        self._save(rec)
+        try:
+            placed, _ = self._place_environment(run, product, sandbox, refs, all_at_base=True)
+            self._bring_up_placed(run, sandbox, placed, environments)
+        except EnvironmentBringUpError as second:
+            if second.outcome is Outcome.NEEDS_SETUP:
+                second.reason = (f"the Environment does not come up with every Repo at its Base branch either: "
+                                 f"{second.reason}")
+            raise
+        raise EnvironmentBringUpError(
+            f"the Environment comes up with every Repo at its Base branch but not with the Story's branches "
+            f"({failed_with_branches.reason})", Outcome.ENVIRONMENT_BROKEN,
+        ) from failed_with_branches
+
+    def _abandon_attempt(self, rec: RunRecord, environments: list[Environment]) -> None:
+        """End a failed bring-up before the retry: keep its service logs beside the event log (they go
+        with the containers otherwise), then take it down, last Repo first."""
+        saved = self._save_environment_logs(rec, environments, subdir="with-branches")
+        rec.environment_logs = {**(rec.environment_logs or {}), **{f"with-branches/{k}": v for k, v in saved.items()}}
+        self._save(rec)
+        for environment in reversed(environments):
+            environment.tear_down()
+        environments.clear()
+        rec.environment_services = None
+        rec.environment_seeds = None  # the retry seeds afresh; these ran in the Environment just taken down
+
+    def _place_environment(
+        self, run: _Run, product: ProductConfig, sandbox: Sandbox, refs: dict[str, str], *, all_at_base: bool
+    ) -> tuple[list[tuple[Placement, Recipe]], bool]:
+        """Every Repo of the Environment with its recipe, dependencies first (#50): the touched Repos
+        that have a Run recipe and, from their `depends_on`, the Repos the run does not touch. Each
+        runs from the branch its place in the Story calls for (or, with `all_at_base`, its Base
+        branch); the run record says which. Also whether any Repo runs from the Story's work rather
+        than from Base."""
+        rec, request = run.record, run.request
+        touched = {t.name: t for t in request.repos}
+        with_base_recipe = {
+            t.name for t in request.repos if _has_recipe_at(t.name, product.repos[t.name].source, refs[t.name])
+        }
+        in_place: set[str] = set()  # Repos that run from something other than their Base branch
+
+        def base_branch_of(name: str) -> str:
+            return touched[name].base_branch if name in touched else product.repos[name].base_branch
+
+        def load(placement: Placement) -> Recipe | None:
+            name = placement.repo
+            if name not in product.repos:
+                raise RecipeError(f"Repo {name!r} is named in a Run recipe's depends_on but is not part of "
+                                  f"Product {request.product!r}")
+            if placement.source == FROM_BASE_BRANCH:
+                if all_at_base and name in touched:
+                    sandbox.put_base_checkout(name, placement.branch, placement.path)
+                else:
+                    sandbox.put_checkout(
+                        product.repos[name].source, name, self._dependency_base_ref(product, name, placement.branch),
+                        placement.path,
+                    )
+            elif placement.source == FROM_TASK_BRANCH:
+                if sandbox.put_task_branch_checkout(
+                    name, placement.branch, touched[name].base_branch, placement.path
+                ):
+                    in_place.add(name)
+                else:
+                    self._note(rec, f"Repo {name!r}: no Task branch {placement.branch!r} yet; its Environment "
+                                    f"runs from Base branch {touched[name].base_branch}")
+            else:  # the agent's working copy: still the Base branch unless it holds the Story's work
+                base = shlex.quote(f"refs/heads/{touched[name].base_branch}")
+                same, _ = sandbox.run(f'test "$(git rev-parse HEAD)" = "$(git rev-parse {base})"', cwd=placement.path)
+                if same != 0:
+                    in_place.add(name)
+            code, text = sandbox.run(f"cat {shlex.quote(RECIPE_PATH)}", cwd=placement.path)
+            if code != 0:
+                if name in with_base_recipe:
+                    raise RecipeError(f"Repo {name!r}: its Run recipe {RECIPE_PATH} is not in the {placement.source} "
+                                      f"(it was on the Base branch): {text.strip()[-300:]}")
+                return None
+            return parse_recipe(name, text)
+
+        try:
+            placed = resolve_environment(touched, request.working_repo, base_branch_of, load, all_at_base)
+        except RecipeError as e:
+            # Seen with the Story's branches in place, a recipe that cannot be used may be the Story's
+            # doing (a broken or removed file, a new cycle): worth trying again at Base (#51).
+            if not all_at_base:
+                rec.environment_bring_up_attempts = ["branches" if in_place else "base"]
+            raise EnvironmentBringUpError(str(e), retryable=bool(in_place) and not all_at_base) from e
+        rec.environment_repos = [p.as_record() for p, _ in placed]
+        self._save(rec)
+        return placed, bool(in_place)
+
+    def _bring_up_placed(
+        self, run: _Run, sandbox: Sandbox, placed: list[tuple[Placement, Recipe]], environments: list[Environment]
+    ) -> None:
+        # An External MCP server's secret the Product lacks stops the run before any service starts
+        # (the servers themselves start once every Repo is up).
+        for placement, recipe in placed:
+            if recipe.external_mcp_secrets:
+                self._load_test_secrets(run, placement.repo, recipe.external_mcp_secrets, "External MCP servers")
+        for placement, recipe in placed:
+            given = self._secrets_for_recipe(run, placement.repo, recipe)
+            environment = Environment(
+                sandbox, placement.repo, now=_now, working_copy=placement.path, secrets=given
+            )
+            environments.append(environment)
+            self._bring_up(run.record, environment, recipe, environments)
+            if run.cancel_requested.is_set():
+                raise _Cancelled
+        self._seed(run.record, environments)
+        # Tell `weave-env` what the Environment is (#54); written once it is up and seeded.
+        sandbox.put_text(WEAVE_ENV_MANIFEST, json.dumps(environment_manifest([p for p, _ in placed], environments)))
+        if run.cancel_requested.is_set():
+            raise _Cancelled
+
+    def _seed(self, rec: RunRecord, environments: list[Environment]) -> None:
+        """Seed once every Repo is ready, dependencies first (#53). `environments` is already in
+        dependency order. Each seed that ran is on the record, even when a later one failed."""
+        try:
+            seed_in_dependency_order(environments)
+        finally:
+            seeded = [e.seeded.as_record() for e in environments if e.seeded]
+            if seeded:
+                rec.environment_seeds = seeded
+                self._save(rec)
+
+    def _ignore_repos_mcp_config(
+        self, run: _Run, product: ProductConfig, sandbox: Sandbox, refs: dict[str, str]
+    ) -> None:
+        """Make the Environment and External MCP servers the only ones the agent can load (#56).
+
+        A Repo's own committed MCP config (`.mcp.json`) is not used: Claude Code loads it without
+        asking in a headless run, so it is not enough to leave it alone. Staging the managed MCP
+        configuration (empty here; the servers are added to it as they start) is what stops it: when
+        that file exists Claude Code loads only its servers. The run's log names each Repo that had one.
+        """
+        rec = run.record
+        stage_mcp_servers(sandbox, {})
+        found = [t.name for t in run.request.repos
+                 if git.has_commit(product.repos[t.name].source, refs[t.name])
+                 and not _missing_on_branch(product.repos[t.name].source, refs[t.name], ".mcp.json")]
+        for repo in found:
+            self._note(rec, f"Repo {repo!r} commits an MCP config (.mcp.json) that this run ignores: "
+                            f"only Environment MCP servers and External MCP servers are given to the agent")
+        if found:
+            rec.repo_mcp_config_ignored = found
+            self._save(rec)
+
+    def _forge_credentials(self, run: _Run, remotes: RunRemotes | None) -> list[str]:
+        """Every Tracker or Code host credential this run's machinery holds: the push gateway's run
+        token and any Code host token variable of the worker's or the Subscription's environment
+        (ADR 0009). None of them may appear in an External MCP server's configuration."""
+        values = [remotes.token] if remotes is not None else []
+        values += [v for k, v in run.lease.env.items() if k.upper() in CODE_HOST_TOKEN_VARS] if run.lease else []
+        values += [v for k, v in os.environ.items() if k.upper() in CODE_HOST_TOKEN_VARS]
+        return [v for v in values if v]
+
+    def _start_external_mcp_servers(
+        self, run: _Run, sandbox: Sandbox, environments: list[Environment], taken: Sequence[str],
+        forge_credentials: Sequence[str],
+    ) -> None:
+        """Give the agent the External MCP servers the recipes declare (#56), in this run's own
+        sandbox (a stdio server is a process its Claude Code starts there; no other run has it).
+
+        Each server gets only the Test secrets its declaration names, from the Product's own file; a
+        named secret the Product lacks stops the run as needs-setup. `taken` are the Environment MCP
+        servers' names. Before anything is staged the configuration is checked for a Tracker or Code
+        host credential (ADR 0009). The record lists the servers by name, run.log has a line each."""
+        rec = run.record
+        declared = [(e.repo, e.recipe.external_mcp) for e in environments if e.recipe is not None and e.recipe.external_mcp]
+        if not declared:
+            return
+        for repo, decls in declared:
+            self._load_test_secrets(run, repo, [n for d in decls for n in d.secrets], "External MCP servers")
+        try:
+            plan = plan_external_servers(declared, run.test_secrets, taken)
+            refuse_forge_credentials(plan, forge_credentials)
+        except McpPlanError as e:
+            raise EnvironmentBringUpError(self._scrub(rec, str(e))) from e
+        stage_mcp_servers(sandbox, plan.entries())
+        rec.external_mcp_servers = [s.as_record() for s in plan.started]
+        self._save(rec)
+        for s in plan.started:
+            given = ", ".join(s.secrets) or "none"
+            self._note(rec, f"External MCP server {s.name} started ({s.transport}; Test secrets: {given})")
+
+    def _start_environment_mcp_servers(
+        self, run: _Run, product: ProductConfig, sandbox: Sandbox, environments: list[Environment]
+    ) -> list[str]:
+        """Give the agent an Environment MCP server for each database the recipes name whose kind the
+        Product enables (#55), wired to that database in this run's own Environment. Called once every
+        Repo is up and seeded, before the agent starts. The record lists what was started and what
+        was omitted with the reason, and run.log has a line for each."""
+        rec = run.record
+        try:
+            plan = plan_environment_servers(
+                [(e.repo, e.recipe.databases) for e in environments if e.recipe is not None],
+                product.database_mcp_kinds,
+            )
+        except McpPlanError as e:
+            raise EnvironmentBringUpError(str(e)) from e
+        if not plan.started and not plan.omitted:
+            return []
+        stage_mcp_servers(sandbox, plan.entries())
+        rec.environment_mcp_servers = [s.as_record() for s in plan.started]
+        rec.environment_mcp_omitted = [o.as_record() for o in plan.omitted]
+        self._save(rec)
+        for s in plan.started:
+            self._note(rec, f"Environment MCP server {s.name} started for {s.address} ({s.kind}, {s.package}, read-write)")
+        for o in plan.omitted:
+            self._note(rec, f"no Environment MCP server for Repo {o.repo!r} service {o.service!r}: {o.reason}")
+        return [s.name for s in plan.started]
+
+    def _secrets_for_recipe(self, run: _Run, repo: str, recipe: Recipe) -> dict[str, str]:
+        """The Test secrets `recipe` (as it runs: a working copy, Task branch or a dependency's Base
+        branch) names, from the Product's own file. Names the start-time check already resolved are
+        reused; others (a dependency Repo's, or one added on the branch) are read now and added to
+        what this run scrubs from everything it records."""
+        have = self._load_test_secrets(run, repo, recipe.secrets, "services")
+        picked = {n: have[n] for n in recipe.secrets}
+        if picked:
+            rec = run.record
+            rec.test_secrets_given = {**(rec.test_secrets_given or {}), repo: sorted(picked)}
+            self._save(rec)
+        return picked
+
+    def _load_test_secrets(self, run: _Run, repo: str, names: Sequence[str], given_to: str) -> dict[str, str]:
+        """Read the named Test secrets of `repo`'s recipe (for its `given_to`: services or External MCP
+        servers) into what the run holds, from the Product's own file, unless already held. A name the
+        Product lacks, or no readable file, is needs-setup. Returns everything held for the Repo: pick
+        by name, so that a service is not given an MCP server's secret or the other way round."""
+        have = run.test_secrets.setdefault(repo, {})
+        wanted = [n for n in dict.fromkeys(names) if n not in have]
+        if wanted:
+            store = self.settings.test_secrets
+            if store is None:
+                raise EnvironmentBringUpError(
+                    f"Repo {repo!r} names Test secret {wanted[0]!r} but no Test secrets are configured "
+                    f"(`test_secrets.location` in weave.yaml)"
+                )
+            try:
+                product_secrets = store.for_product(run.request.product)
+            except SecretsError as e:
+                raise EnvironmentBringUpError(f"Repo {repo!r} names Test secret {wanted[0]!r}: {e}") from e
+            if lacking := product_secrets.missing(wanted):
+                raise EnvironmentBringUpError(
+                    f"Repo {repo!r} names Test secret {lacking[0]!r} that Product {run.request.product!r} "
+                    f"does not have: add it to {product_secrets.path}"
+                )
+            have.update(product_secrets.select(wanted))
+            self._note(run.record, f"Test secrets given to Repo {repo!r}'s {given_to}: {', '.join(wanted)} (names only; values are never recorded)")
+        return have
+
+    def _dependency_base_ref(self, product: ProductConfig, name: str, base_branch: str) -> str:
+        """Where to read the Base branch of a Repo the run does not touch: the Code host's, just
+        fetched into the clone, or the clone's own branch when it has no Code host remote."""
+        repo = product.repos[name]
+        try:
+            remote = git.code_host_remote(repo.source, repo.push_remote)
+            return git.fetch_base(repo.source, remote, base_branch) if remote else f"refs/heads/{base_branch}"
+        except GitError as e:
+            raise GitError(f"Repo {name!r}: {e}") from e
+
+    def _bring_up(
+        self, rec: RunRecord, environment: Environment, recipe: Recipe, environments: list[Environment]
+    ) -> None:
+        """Bring one Repo's recipe up. The run record lists every service that became ready, even
+        when a later one did not."""
+        try:
+            environment.bring_up(recipe)
+        finally:
+            # Whatever became ready is on the record, even when a later service did not.
+            rec.environment_services = [r.as_record() for e in environments for r in e.ready]
+            self._save(rec)
+
+    def _stop(
+        self, conversation: Any, sandbox: Sandbox | None, rec: RunRecord, environments: list[Environment] = ()
+    ) -> list[str] | None:
         """Close the conversation (never just interrupt it, #13), then remove the sandbox.
 
-        Best effort: each step that fails is noted in run.log, and the next one still runs.
+        Best effort: each step that fails is noted in run.log, and the next one still runs. The
+        Environment's service logs are saved outside the sandbox first, while they still exist.
         """
         leftovers: list[str] | None = None
         if conversation is not None:
@@ -357,6 +819,8 @@ class AgentWorker:
             # Deletes the conversation on the agent-server.
             self._best_effort(rec, "closing the agent's conversation", conversation.close)
         if sandbox is not None:
+            if environments:
+                rec.environment_logs = {**(rec.environment_logs or {}), **self._save_environment_logs(rec, environments)}
             if conversation is not None:
                 leftovers = self._best_effort(rec, "listing processes left after close",
                                               lambda: _settle(sandbox.processes))
@@ -366,6 +830,23 @@ class AgentWorker:
             )
             self._best_effort(rec, "removing the sandbox", sandbox.destroy)
         return leftovers
+
+    def _save_environment_logs(
+        self, rec: RunRecord, environments: list[Environment], subdir: str = ""
+    ) -> dict[str, str]:
+        """Save every Environment service's log under the run's folder, beside the event log."""
+        destination = self._run_dir(rec.run_id) / ENVIRONMENT_LOGS_DIR / subdir
+        saved: dict[str, str] = {}
+        for environment in environments:
+            try:
+                saved.update(environment.save_logs(destination))
+            except LogsNotSaved as e:
+                saved.update(e.saved)  # the ones that could be read are still on the record
+                self._note(rec, f"teardown: saving the service logs failed: {e}")
+            except Exception as e:
+                self._note(rec, f"teardown: saving the service logs of Repo {environment.repo!r} failed: "
+                                f"{type(e).__name__}: {e}")
+        return saved
 
     def _best_effort(self, rec: RunRecord, what: str, step: Callable[[], T]) -> T | None:
         """Run one teardown step; if it fails, note it with its error and carry on."""
@@ -412,7 +893,14 @@ class AgentWorker:
 
     def _note(self, rec: RunRecord, line: str) -> None:
         with open(self._run_dir(rec.run_id) / "run.log", "a") as f:
-            f.write(f"{_now()} {line}\n")
+            f.write(f"{_now()} {self._scrub(rec, line)}\n")
+
+    def _scrub(self, rec: RunRecord, text: str) -> str:
+        """`text` without any Test secret value given to this run: the last guard before it is written."""
+        with self._lock:
+            run = self._runs.get(rec.run_id)
+        given = run.test_secrets if run is not None else {}
+        return redact(text, [v for values in given.values() for v in values.values()])
 
 
 def _missing_on_branch(source: str, ref: str, path: str) -> bool:
@@ -424,6 +912,68 @@ def _missing_on_branch(source: str, ref: str, path: str) -> bool:
     if not git.has_commit(source, ref):
         return False
     return subprocess.run(["git", "-C", source, "cat-file", "-e", f"{ref}:{path}"], capture_output=True).returncode != 0
+
+
+def _recipe_secret_names(repo: str, source: str, ref: str, services_only: bool = False) -> tuple[str, ...]:
+    """The Test secrets a Repo's Run recipe names on its Base branch (read at `ref`), by name: its
+    services' and its External MCP servers' (#56), or with `services_only` just the services'.
+
+    A Repo with no recipe, or a recipe that cannot be read or parsed, names none here: the run
+    itself reports an unusable recipe.
+    """
+    recipe = _recipe_at(repo, source, ref)
+    if recipe is None:
+        return ()
+    return recipe.secrets if services_only else recipe.all_secrets
+
+
+def _recipe_at(repo: str, source: str, ref: str) -> Recipe | None:
+    """A Repo's parsed Run recipe as committed at `ref` in its clone, or None when there is none or it
+    cannot be read or parsed (the run itself reports that, so the pre-checks here do not refuse it)."""
+    try:
+        if not _has_recipe_at(repo, source, ref):
+            return None
+        shown = subprocess.run(["git", "-C", source, "show", f"{ref}:{RECIPE_PATH}"], capture_output=True, text=True)
+        return parse_recipe(repo, shown.stdout) if shown.returncode == 0 else None
+    except (GitError, RecipeError):
+        return None
+
+
+def _has_recipe_at(repo: str, source: str, ref: str) -> bool:
+    """`_has_recipe`, or False when the clone cannot be read at all (a pre-check never refuses on that)."""
+    try:
+        return _has_recipe(source, ref)
+    except GitError:
+        return False
+
+
+def _has_recipe_in_place(target: RepoTarget, source: str, base_ref: str, working_repo: str) -> bool:
+    """True when the Repo has a Run recipe where its Environment would run from: on its Base branch,
+    or, for a Repo other than the one being worked on, on its Task branch (the Integration branch, as
+    the sandbox's clone has it), where a Story may have added the Repo's first recipe. A Repo that
+    cannot be read raises GitError: that is a fault to report, not a Repo with no recipe."""
+    try:
+        if _has_recipe(source, base_ref):
+            return True
+        task_branch = f"refs/heads/{target.integration_branch}"
+        return (
+            target.name != working_repo and git.has_commit(source, task_branch) and _has_recipe(source, task_branch)
+        )
+    except GitError as e:
+        raise GitError(f"Repo {target.name!r}: {e}") from e
+
+
+def _has_recipe(source: str, ref: str) -> bool:
+    """True when the Repo has a Run recipe at `ref` in its clone; False only when it genuinely has
+    none. GitError when the clone or `ref` cannot be read: that is not "no recipe"."""
+    if not git.has_commit(source, ref):
+        raise GitError(f"cannot read {ref!r} in the clone at {source}")
+    listed = subprocess.run(
+        ["git", "-C", source, "ls-tree", "-r", "--name-only", ref, "--", RECIPE_PATH], capture_output=True, text=True
+    )
+    if listed.returncode != 0:
+        raise GitError(f"cannot look for {RECIPE_PATH} at {ref!r} in the clone at {source}: {listed.stderr.strip()}")
+    return bool(listed.stdout.strip())
 
 
 def _code_host_remotes(request: RunRequest, product: ProductConfig) -> dict[str, str | None]:
