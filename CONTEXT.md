@@ -67,7 +67,7 @@ A file committed in a Repo that says how to bring that Repo's software up in an 
 _Avoid:_ "setup", "dev env" (both also mean a developer's machine).
 
 ## Environment
-A running copy of a Story's software that an agent run (implement, review or proofs) calls over the network, brought up from Run recipes. Each Repo in it is at: the agent's working copy for the Task being worked on; the Task branch for any other Repo the Story touches; the **Base branch** for a Repo the Story does not touch. A proof round uses one Environment for every Proof of the Story, captured one after another, once all the Story's Tasks have passed agent review. How isolated it is from other Stories' Environments, and how it is brought up, is an implementation choice recorded in ADRs, not part of this term: ADR 0004 (as amended by ADR 0011) describes an isolated, throwaway set of containers per run, built once a working sysbox host exists (Spec 2c); until then, ADR 0012's Phase 1 Environment is a worktree-started backend against a branch of a shared database, with a round after rework resetting that branch rather than starting a fresh container.
+A running copy of a Story's software that an agent run (implement, review or proofs) calls over the network, brought up from Run recipes. It runs from the Story's **Story workspace**: each Repo the Story touches at what the agent has built so far on its Integration branch, every other at its **Base branch**. A proof round uses one Environment for every Proof of the Story, captured one after another, once all the Story's Tasks have passed agent review. How isolated it is from other Stories' Environments, and how it is brought up, is an implementation choice recorded in ADRs, not part of this term: today (ADR 0013) a run starts the Story's backends inside the **Product agent server** for that run only, against **Branched** and **Shared databases**; the isolated, throwaway containers per run of ADR 0004 (Spec 2c) are parked.
 _Avoid:_ "staging" (the shared deploy target after merge), "sandbox" alone (the agent's own workspace), "proof environment".
 
 ## Product agent server
@@ -165,7 +165,7 @@ A State where the workflow waits for a human (grilling, triage, human review, me
 The deterministic service that moves Stories and Tasks from one State to the next; one per Product. It starts agent runs and Checks and collects their outcomes, but never judges code itself and never waits on a run. It reads State from the Tracker and writes State back to it, but never holds State itself; what it keeps of its own is **Run bookkeeping**.
 
 ## Sandbox host
-The one machine where every agent sandbox and Environment runs, shared by all Products, each Product capped in how many runs it may have at once. The Dispatchers live on it too.
+The one machine where every **Product agent server**, and so every agent run and Environment, runs, shared by all Products, each Product capped in how many runs it may have at once. The Dispatchers live on it too.
 _Avoid:_ "server" alone, "staging" (the shared deploy target after merge).
 
 ## Workflow dashboard
