@@ -53,7 +53,7 @@ A public boundary of a Repo's code where a Task's tests observe behaviour (an AP
 _Avoid:_ "test point", "unit" (both invite testing internals).
 
 ## Integration branch
-The one branch per Story per Repo into which every Task of that Story in that Repo is merged as it is built. A PR is opened from it.
+The one branch per Story per Repo into which every Task of that Story in that Repo is merged as it is built. Cut from the Repo's **Base branch** when the Story starts. A PR is opened from it, back into the Base branch.
 
 ## Proof
 Evidence, captured by an agent from the running software, that one Acceptance criterion works: screenshots or a recording for UI, the request, response and server log lines for an API, the command and its output for a CLI or job. Every Acceptance criterion has one, unless it is Not provable here. A test-run report travels with Proofs but is never a Proof on its own. A Proof that shows the thing failing is a defect, not a Proof. An Acceptance criterion the proofs agent cannot prove counts as a failing Proof.
@@ -69,6 +69,10 @@ _Avoid:_ "setup", "dev env" (both also mean a developer's machine).
 ## Environment
 A running copy of a Story's software that an agent run (implement, review or proofs) calls over the network, brought up from Run recipes. Each Repo in it is at: the agent's working copy for the Task being worked on; the Task branch for any other Repo the Story touches; the **Base branch** for a Repo the Story does not touch. A proof round uses one Environment for every Proof of the Story, captured one after another, once all the Story's Tasks have passed agent review. How isolated it is from other Stories' Environments, and how it is brought up, is an implementation choice recorded in ADRs, not part of this term: ADR 0004 (as amended by ADR 0011) describes an isolated, throwaway set of containers per run, built once a working sysbox host exists (Spec 2c); until then, ADR 0012's Phase 1 Environment is a worktree-started backend against a branch of a shared database, with a round after rework resetting that branch rather than starting a fresh container.
 _Avoid:_ "staging" (the shared deploy target after merge), "sandbox" alone (the agent's own workspace), "proof environment".
+
+## Story workspace
+One folder per Story on the Sandbox host holding a copy of every Repo that Story's Environment needs: each Repo the Story touches at its Integration branch, every other at its Base branch. It is the agent's working copy in every run of that Story, and the Environment runs that Story's software from it, so the running software is always what the agent has just built. Reused by every round of the Story; removed once the Story is merged or abandoned. Never shared between Stories.
+_Avoid:_ "worktree" (the per-Task working folders `implement-spec` makes inside it), "workspace" alone (each agent tool means something different by it), "sandbox" (the agent's own container).
 
 ## Run image
 A prebuilt image of one service in a Repo's Run recipe, used by every Environment of that Repo so it need not be built each run: an app service with its dependencies installed, or a database with its base data inside. Built by a human from the Base branch whenever they judge it too old; never replaced by a run. An app Run image is reused only while the files it was built from are unchanged in the run's working copy; source code is never one of them. A service the Run recipe marks as rebuilt every run (e.g. a frontend served from its production build) is always built in the run, using its Run image only to build faster. A Repo without Run images still runs, more slowly.
