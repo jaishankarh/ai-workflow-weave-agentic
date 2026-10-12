@@ -60,7 +60,7 @@ Evidence, captured by an agent from the running software, that one Acceptance cr
 _Avoid:_ "logs" alone, "test results" as proof, "spec item" (say Acceptance criterion).
 
 ## Not provable here
-A mark on an Acceptance criterion saying no agent can capture its Proof, so a human checks it at review instead. Set only in the Grilling session, never by an agent, and only for a fixed list of reasons: the Repo has no Run recipe; it needs iOS; or it depends on an outside system that has no test account or sandbox. The criterion is still tested.
+A mark on an Acceptance criterion saying no agent can capture its Proof, so a human checks it at review instead. Set only in the Grilling session, never by an agent, and only for a fixed list of reasons: the Repo has no Run recipe; it needs iOS; it depends on an outside system that has no test account or sandbox; or it needs a schema change in a **Shared database**. The criterion is still tested.
 
 ## Run recipe
 A file committed in a Repo that says how to bring that Repo's software up in an **Environment**: what to build, which other Repos it depends on, which services it needs, what data to seed, which secrets it uses, and how to tell it is ready. Changes with the code, in the same PR. A Repo without a Run recipe cannot be run by agents: its Acceptance criteria are **Not provable here**.
@@ -82,7 +82,7 @@ _Avoid:_ "worktree" (the per-Task working folders `implement-spec` makes inside 
 A database a Run recipe names that the Product provides as one long-lived server with a branch per Story: cut from a shared base the first time the Story's Environment comes up, used by every run of that Story, and dropped once the Story is merged or abandoned. Only for a database kind that can branch. Whether a database is branched or a **Shared database** is set per Product, never in the Run recipe.
 
 ## Shared database
-A database a Run recipe names that the Product provides as one long-lived instance used as-is by every Story at once, with no separation between them (e.g. a cache, a graph database, or any database the Product chooses not to branch).
+A database a Run recipe names that the Product provides as one long-lived instance used as-is by every Story at once, with no separation between them (e.g. a cache, a graph database, or any database the Product chooses not to branch). Kept matching the Base branch by a human; a run never migrates or seeds it, and reaches it through an Environment MCP server only to read.
 _Avoid:_ "global database", "common DB".
 
 ## Run image
@@ -185,7 +185,7 @@ The skills and MCP servers staged into one agent run. Skills come from the **Cen
 _Avoid:_ "plugins", "tools" alone (both also name an agent's built-in abilities).
 
 ## Environment MCP server
-An MCP server for one database in a run's Environment: one per database, started for that run, wired to that database before the agent starts, and gone when the run ends. Exists only for a database the Run recipe names and whose kind the Product enables; full read-write, since the data is the run's own.
+An MCP server for one database in a run's Environment: one per database, started for that run, wired to that database before the agent starts, and gone when the run ends. Exists only for a database the Run recipe names and whose kind the Product enables; full read-write on a **Branched database**, since the branch is the Story's own; read-only on a **Shared database**, since every Story uses it.
 
 ## External MCP server
 An MCP server a Repo's Run recipe declares for something outside the Environment, defined the same for every run; each run starts its own copy. Reaches outside systems only with credentials from the Product's **Test secrets**, so never staging or production, and never the Product's Tracker or Code host.
