@@ -5,6 +5,11 @@ and `docs/adr/` for decisions.
 
 ## Agent worker (Spec 1)
 
+> **Being replaced.** This section describes Spec 1 as built: a fresh container per run.
+> [ADR 0013](docs/adr/0013-runs-happen-inside-one-long-lived-product-agent-server.md)
+> replaces that with one long-lived **Product agent server** per Product, inside which
+> every run happens; Spec 2.1 builds it. Until then this is how the code behaves.
+
 `workflow_weave.agent_worker.AgentWorker` runs an Agent profile in a fresh,
 throwaway Docker sandbox through the OpenHands SDK (`ACPAgent` against the
 agent-server in the sandbox):

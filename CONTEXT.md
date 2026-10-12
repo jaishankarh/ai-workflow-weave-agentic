@@ -53,22 +53,37 @@ A public boundary of a Repo's code where a Task's tests observe behaviour (an AP
 _Avoid:_ "test point", "unit" (both invite testing internals).
 
 ## Integration branch
-The one branch per Story per Repo into which every Task of that Story in that Repo is merged as it is built. A PR is opened from it.
+The one branch per Story per Repo into which every Task of that Story in that Repo is merged as it is built. Cut from the Repo's **Base branch** when the Story starts. A PR is opened from it, back into the Base branch.
 
 ## Proof
 Evidence, captured by an agent from the running software, that one Acceptance criterion works: screenshots or a recording for UI, the request, response and server log lines for an API, the command and its output for a CLI or job. Every Acceptance criterion has one, unless it is Not provable here. A test-run report travels with Proofs but is never a Proof on its own. A Proof that shows the thing failing is a defect, not a Proof. An Acceptance criterion the proofs agent cannot prove counts as a failing Proof.
 _Avoid:_ "logs" alone, "test results" as proof, "spec item" (say Acceptance criterion).
 
 ## Not provable here
-A mark on an Acceptance criterion saying no agent can capture its Proof, so a human checks it at review instead. Set only in the Grilling session, never by an agent, and only for a fixed list of reasons: the Repo has no Run recipe; it needs iOS; or it depends on an outside system that has no test account or sandbox. The criterion is still tested.
+A mark on an Acceptance criterion saying no agent can capture its Proof, so a human checks it at review instead. Set only in the Grilling session, never by an agent, and only for a fixed list of reasons: the Repo has no Run recipe; it needs iOS; it depends on an outside system that has no test account or sandbox; or it needs a schema change in a **Shared database**. The criterion is still tested.
 
 ## Run recipe
 A file committed in a Repo that says how to bring that Repo's software up in an **Environment**: what to build, which other Repos it depends on, which services it needs, what data to seed, which secrets it uses, and how to tell it is ready. Changes with the code, in the same PR. A Repo without a Run recipe cannot be run by agents: its Acceptance criteria are **Not provable here**.
 _Avoid:_ "setup", "dev env" (both also mean a developer's machine).
 
 ## Environment
-A running copy of a Story's software that an agent run (implement, review or proofs) calls over the network, brought up from Run recipes. Each Repo in it is at: the agent's working copy for the Task being worked on; the Task branch for any other Repo the Story touches; the **Base branch** for a Repo the Story does not touch. A proof round uses one Environment for every Proof of the Story, captured one after another, once all the Story's Tasks have passed agent review. How isolated it is from other Stories' Environments, and how it is brought up, is an implementation choice recorded in ADRs, not part of this term: ADR 0004 (as amended by ADR 0011) describes an isolated, throwaway set of containers per run, built once a working sysbox host exists (Spec 2c); until then, ADR 0012's Phase 1 Environment is a worktree-started backend against a branch of a shared database, with a round after rework resetting that branch rather than starting a fresh container.
+A running copy of a Story's software that an agent run (implement, review or proofs) calls over the network, brought up from Run recipes. It runs from the Story's **Story workspace**: each Repo the Story touches at what the agent has built so far on its Integration branch, every other at its **Base branch**. A proof round uses one Environment for every Proof of the Story, captured one after another, once all the Story's Tasks have passed agent review. How isolated it is from other Stories' Environments, and how it is brought up, is an implementation choice recorded in ADRs, not part of this term: today (ADR 0013) a run starts the Story's backends inside the **Product agent server** for that run only, against **Branched** and **Shared databases**; the isolated, throwaway containers per run of ADR 0004 (Spec 2c) are parked.
 _Avoid:_ "staging" (the shared deploy target after merge), "sandbox" alone (the agent's own workspace), "proof environment".
+
+## Product agent server
+The one long-lived agent server of a Product, walled off from the Sandbox host, inside which every agent run of every Story of that Product happens. Set up once as part of setting up the Product; a run never creates one. A human can watch, message, pause and approve its runs from OpenHands' web client, where it is registered as a "backend".
+_Avoid:_ "backend" (names a Repo's own server), "sandbox" (the per-run container it replaces).
+
+## Story workspace
+One folder per Story on the Sandbox host holding a copy of every Repo that Story's Environment needs: each Repo the Story touches at its Integration branch, every other at its Base branch. It is the agent's working copy in every run of that Story, and the Environment runs that Story's software from it, so the running software is always what the agent has just built. Reused by every round of the Story; removed once the Story is merged or abandoned. Never shared between Stories.
+_Avoid:_ "worktree" (the per-Task working folders `implement-spec` makes inside it), "workspace" alone (each agent tool means something different by it), "sandbox" (the agent's own container).
+
+## Branched database
+A database a Run recipe names that the Product provides as one long-lived server with a branch per Story: cut from a shared base the first time the Story's Environment comes up, used by every run of that Story, and dropped once the Story is merged or abandoned. Only for a database kind that can branch. Whether a database is branched or a **Shared database** is set per Product, never in the Run recipe.
+
+## Shared database
+A database a Run recipe names that the Product provides as one long-lived instance used as-is by every Story at once, with no separation between them (e.g. a cache, a graph database, or any database the Product chooses not to branch). Kept matching the Base branch by a human; a run never migrates or seeds it, and reaches it through an Environment MCP server only to read.
+_Avoid:_ "global database", "common DB".
 
 ## Run image
 A prebuilt image of one service in a Repo's Run recipe, used by every Environment of that Repo so it need not be built each run: an app service with its dependencies installed, or a database with its base data inside. Built by a human from the Base branch whenever they judge it too old; never replaced by a run. An app Run image is reused only while the files it was built from are unchanged in the run's working copy; source code is never one of them. A service the Run recipe marks as rebuilt every run (e.g. a frontend served from its production build) is always built in the run, using its Run image only to build faster. A Repo without Run images still runs, more slowly.
@@ -150,7 +165,7 @@ A State where the workflow waits for a human (grilling, triage, human review, me
 The deterministic service that moves Stories and Tasks from one State to the next; one per Product. It starts agent runs and Checks and collects their outcomes, but never judges code itself and never waits on a run. It reads State from the Tracker and writes State back to it, but never holds State itself; what it keeps of its own is **Run bookkeeping**.
 
 ## Sandbox host
-The one machine where every agent sandbox and Environment runs, shared by all Products, each Product capped in how many runs it may have at once. The Dispatchers live on it too.
+The one machine where every **Product agent server**, and so every agent run and Environment, runs, shared by all Products, each Product capped in how many runs it may have at once. The Dispatchers live on it too.
 _Avoid:_ "server" alone, "staging" (the shared deploy target after merge).
 
 ## Workflow dashboard
@@ -170,7 +185,7 @@ The skills and MCP servers staged into one agent run. Skills come from the **Cen
 _Avoid:_ "plugins", "tools" alone (both also name an agent's built-in abilities).
 
 ## Environment MCP server
-An MCP server for one database in a run's Environment: one per database, started for that run, wired to that database before the agent starts, and gone when the run ends. Exists only for a database the Run recipe names and whose kind the Product enables; full read-write, since the data is the run's own.
+An MCP server for one database in a run's Environment: one per database, started for that run, wired to that database before the agent starts, and gone when the run ends. Exists only for a database the Run recipe names and whose kind the Product enables; full read-write on a **Branched database**, since the branch is the Story's own; read-only on a **Shared database**, since every Story uses it.
 
 ## External MCP server
 An MCP server a Repo's Run recipe declares for something outside the Environment, defined the same for every run; each run starts its own copy. Reaches outside systems only with credentials from the Product's **Test secrets**, so never staging or production, and never the Product's Tracker or Code host.
