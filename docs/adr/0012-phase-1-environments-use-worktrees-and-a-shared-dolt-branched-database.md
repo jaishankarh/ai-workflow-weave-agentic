@@ -20,3 +20,5 @@ This is explicitly temporary. The Run recipe contract, the Environment MCP serve
 - A Repo's Run recipe gains no new required fields for Phase 1; the fields a container-based Environment would read (image names, published ports) are simply unused by this implementation.
 - Migrating a Repo from this Environment to Spec 2c's later is swapping which code reads the same recipe, not a new recipe format or a Spec 3/4 change.
 - Spec 2b (Run images, ADR 0011) has nothing to prebuild under this ADR — there is no container to rebuild from — so it now depends on Spec 2c, not on Spec 2 as rewritten.
+
+_Amended by [ADR 0013](0013-runs-happen-inside-one-long-lived-product-agent-server.md):_ a Story's backend no longer runs as a plain host process from a host-level worktree; it runs inside the Product agent server from the Story workspace. The Dolt/Doltgres server per Product and one branch per Story stand; the shared base is only a starting point (the Repo's migrate and seed run against the Story's branch at every bring-up) and a Story's branch is dropped, never merged back.
